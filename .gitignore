@@ -1,0 +1,35 @@
+# Game data stays on the local machine only (id Software / DeFRaG / map authors' content)
+*.pk3
+*.bsp
+*.aas
+*.dm_68
+*.dm_*
+q3key
+baseq3/
+defrag/
+/game/
+
+# Build output
+build/
+/sim/build/
+/viewer/build/
+*.o
+*.so
+*.a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Training output (large; runs are re-renderable from inputs)
+/runs/
+/clips/
+/checkpoints/
+/logs/
+
+# Local config (stream key, local paths)
+*.local.toml
+*.local.json
+.env

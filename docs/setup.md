@@ -189,7 +189,7 @@ where the video is posted):
 .venv/bin/python tools/play_agent.py tatmt-s2 runs/tatmt-s2/<name>/agent.pt -o build/runs/tatmt-s2_ai --greedy
 tools/render_run.sh build/runs/tatmt-s2_ai.run tatmt-s2_ai
 .venv/bin/python tools/overlay.py build/video/tatmt-s2_ai.mp4 build/runs/tatmt-s2_ai.think.npz \
-    runs/tatmt-s2/<name>/agent.pt --label "25 MIN OF TRAINING" --end 9
+    runs/tatmt-s2/<name>/agent.pt --label "25 MIN OF TRAINING" --start 0.65 --end 8.65
 ```
 
 The result is `build/video/tatmt-s2_ai_overlay.mp4`.

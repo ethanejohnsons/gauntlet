@@ -6,9 +6,9 @@ Takes the video from tools/render_run.sh and the thinking from tools/play_agent.
 
   - the network: inputs, two hidden layers (the 24 busiest neurons of each) and the
     outputs, lit by their real activations, with the strongest real connections
-  - its choices: how sure it is about each key and turn rate, the pick highlighted
-  - its value estimate ("how well is this going?"), with its recent history
-  - the keys it's holding and its speed
+  - its choices: how sure it is about each key and turn rate, the pick in amber
+  - its value estimate ("how well is this going?") over the last few seconds
+  - the keys it's holding
 
 Every number drawn is what the network computed at that moment. The timing comes
 from the engine: gs_video.log gives each video frame's game time, gs_replay.log the
@@ -40,7 +40,6 @@ EDGE_LIGHT, EDGE_DARK = (62, 63, 69, 255), (20, 21, 23, 255)
 TEXT, DIM = (201, 199, 191), (123, 121, 115)
 AMBER, GREEN, RED = (232, 176, 74), (127, 209, 139), (217, 118, 95)
 
-INPUT_GROUPS = [("MOTION", 0, 7), ("FEELERS", 7, 33), ("ROUTE", 33, 45), ("TIMER", 45, 46)]
 CHOICES = [("FWD", ["BACK", "-", "FWD"]), ("SIDE", ["LEFT", "-", "RIGHT"]), ("JUMP", ["NO", "YES"]),
            ("TURN", [f"{r:+g}" for r in genv.TURN_RATES])]
 SHOWN = 24      # hidden neurons drawn per layer
@@ -75,6 +74,10 @@ def signed(v, alpha=255):
 
 
 class Panel:
+    """The panel: the network on top, its choices, its value estimate and the keys below.
+    It sits on the right, between DeFRaG's third-person view (top right) and its timer
+    (bottom right), and keeps text to the few labels needed to read it."""
+
     def __init__(self, think, agent, size, label):
         self.t = think
         self.w, self.h = size
@@ -88,48 +91,44 @@ class Panel:
         self.w3 = agent["policy.weight"].numpy()[:, self.sel2]                    # (19, 24)
         self.values = think["value"]
 
-        # layout of the panel (x0, y0 = its top-left corner on the video)
-        self.pw, self.ph = 372, self.h - 16
-        self.x0, self.y0 = self.w - self.pw - 8, 8
-        top, bottom = self.y0 + 34, self.y0 + 470
-        cols = [self.x0 + 70, self.x0 + 150, self.x0 + 225, self.x0 + 300]
+        # layout, scaled from a 1280x720 frame: right edge, y 150..650
+        sx, sy = self.w / 1280, self.h / 720
+        self.x0, self.y0 = int(948 * sx), int(150 * sy)
+        self.pw, self.ph = int(324 * sx), int(500 * sy)
+        top, bottom = self.y0 + 14, self.y0 + int(340 * sy)
+        cols = [self.x0 + self.pw * f for f in (0.08, 0.37, 0.66, 0.92)]
         self.inputs = [(cols[0], top + i * (bottom - top) / 45) for i in range(46)]
-        self.h1 = [(cols[1], top + 8 + i * (bottom - top - 16) / (SHOWN - 1)) for i in range(SHOWN)]
-        self.h2 = [(cols[2], top + 8 + i * (bottom - top - 16) / (SHOWN - 1)) for i in range(SHOWN)]
-        self.outputs = []
-        y = top
+        self.h1 = [(cols[1], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
+        self.h2 = [(cols[2], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
+        # outputs: one column, a small gap between the four choices
+        self.outputs, y = [], top
+        step = (bottom - top) / 21.5
         for _, names in CHOICES:
             for _ in names:
                 self.outputs.append((cols[3], y))
-                y += (bottom - top) / 21
-            y += (bottom - top) / 42
+                y += step
+            y += step / 2
+        self.rows_y = bottom + 16
         self.background = self._background()
 
-    def _box(self, d, box, title=None):
+    def _box(self, d, box):
         x0, y0, x1, y1 = box
         d.rectangle(box, fill=PANEL)
         d.line([(x0, y1), (x0, y0), (x1, y0)], fill=EDGE_LIGHT)
         d.line([(x1, y0), (x1, y1), (x0, y1)], fill=EDGE_DARK)
-        if title:
-            d.text((x0 + 8, y0 + 4), title, font=self.font, fill=DIM)
 
     def _background(self):
         img = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        x0, y0 = self.x0, self.y0
-        self._box(d, (x0, y0, x0 + self.pw, y0 + self.ph))
-        d.text((x0 + 10, y0 + 6), "NEURAL NET", font=self.font, fill=DIM)
-        d.text((x0 + self.pw - 10 - 9 * 10, y0 + 6), "LIVE INPUT", font=self.font, fill=DIM)
-        for name, a, b in INPUT_GROUPS:
-            ys = [self.inputs[i][1] for i in range(a, b)]
-            d.text((x0 + 8, (ys[0] + ys[-1]) / 2 - 8), name[:7], font=self.font, fill=DIM)
-        names = [n for _, ns in CHOICES for n in ns]
-        for (x, y), n in zip(self.outputs, names):
-            d.text((x + 9, y - 8), n, font=self.font, fill=DIM)
-        # the "AI is playing" tag, top middle of the game view
+        self._box(d, (self.x0, self.y0, self.x0 + self.pw, self.y0 + self.ph))
+        y = self.rows_y
+        for name, _ in CHOICES:
+            d.text((self.x0 + 10, y), name, font=self.font, fill=DIM)
+            y += 20
+        # the "AI is playing" tag, top middle of the frame
         tag = f"AI PLAYING  ·  {self.label}" if self.label else "AI PLAYING"
         tw = d.textlength(tag, font=self.font)
-        tx = (self.x0 - tw) / 2 - 10
+        tx = (self.w - tw) / 2 - 10
         self._box(d, (tx, 8, tx + tw + 20, 34))
         d.text((tx + 10, 12), tag, font=self.font, fill=AMBER)
         return img
@@ -142,21 +141,21 @@ class Panel:
         h2, probs = t["hidden2"][d_index][self.sel2], t["probs"][d_index]
         action = t["action"][d_index]
 
-        # connections: for each neuron, its 3 strongest incoming weighted signals
+        # connections: for each neuron, its strongest incoming weighted signals
         def links(src_pts, src_act, dst_pts, w, k=3):
             for j, (dx, dy) in enumerate(dst_pts):
                 signal = w[j] * src_act
                 for i in np.argsort(-np.abs(signal))[:k]:
-                    s = signal[i]
-                    strength = min(1.0, abs(s) / 1.5)
+                    strength = min(1.0, abs(signal[i]) / 1.5)
                     if strength > 0.05:
                         sx, sy = src_pts[i]
-                        d.line([(sx, sy), (dx, dy)], fill=signed(np.sign(s) * strength, int(60 + 150 * strength)))
+                        d.line([(sx, sy), (dx, dy)],
+                               fill=signed(np.sign(signal[i]) * strength, int(60 + 150 * strength)))
         links(self.inputs, obs, self.h1, self.w1)
         links(self.h1, h1, self.h2, self.w2)
         links(self.h2, h2, self.outputs, self.w3, k=2)
 
-        # neurons: square pixels, lit by activation
+        # neurons: square pixels, lit by activation; outputs by probability, the pick in amber
         for (x, y), v in zip(self.inputs, obs):
             d.rectangle([x - 3, y - 3, x + 3, y + 3], fill=signed(np.clip(v, -1, 1)), outline=EDGE_LIGHT)
         for pts, acts in ((self.h1, h1), (self.h2, h2)):
@@ -166,56 +165,44 @@ class Panel:
         for g, (_, names) in enumerate(CHOICES):
             for k in range(len(names)):
                 x, y = self.outputs[offset + k]
-                p = probs[offset + k]
-                chosen = k == action[g]
-                d.rectangle([x - 4, y - 4, x + 4, y + 4], fill=mix(AMBER if chosen else GREEN, p), outline=EDGE_LIGHT)
+                color = AMBER if k == action[g] else GREEN
+                d.rectangle([x - 4, y - 4, x + 4, y + 4], fill=mix(color, probs[offset + k]), outline=EDGE_LIGHT)
             offset += len(names)
 
-        # choices: one bar per choice, split by probability; the pick in amber
-        x0, y = self.x0 + 10, self.y0 + 486
-        d.text((x0, y), "CHOICES (HOW SURE)", font=self.font, fill=DIM)
-        y += 22
+        # choices: one bar per choice, split by probability, the pick in amber
+        x0, y = self.x0 + 60, self.rows_y
+        bw = self.pw - 72
         offset = 0
-        bx, bw = x0 + 48, self.pw - 175
-        for g, (name, names) in enumerate(CHOICES):
-            d.text((x0, y), name, font=self.font, fill=DIM)
-            left = bx
+        for g, (_, names) in enumerate(CHOICES):
+            left = x0
             for k in range(len(names)):
-                p = float(probs[offset + k])
-                right = left + bw * p
+                right = left + bw * float(probs[offset + k])
                 if right - left >= 1:
                     shade = AMBER if k == action[g] else (GREEN if k % 2 == 0 else (88, 150, 98))
-                    d.rectangle([left, y + 2, right - 1, y + 14], fill=shade)
+                    d.rectangle([left, y + 3, right - 1, y + 13], fill=shade)
                 left = right
-            pick = action[g]
-            d.text((bx + bw + 8, y), f"{names[pick]:>5s} {probs[offset + pick]:3.0%}", font=self.font, fill=AMBER)
             offset += len(names)
             y += 20
 
-        # value estimate, with the last 4 seconds of it
+        # value estimate over the last 4 seconds: how well the network thinks it's going
         y += 6
-        v = float(t["value"][d_index])
-        d.text((x0, y), "EXPECTS", font=self.font, fill=DIM)
-        d.text((x0 + 80, y), f"{v:6.2f}", font=self.font, fill=AMBER)
         hist = self.values[max(0, d_index - 125):d_index + 1]
         lo, hi = float(self.values.min()), float(self.values.max()) + 1e-6
-        gx, gw, gy, gh = x0 + 150, self.pw - 170, y + 2, 14
-        pts = [(gx + gw * i / max(1, len(hist) - 1), gy + gh - gh * (h - lo) / (hi - lo)) for i, h in enumerate(hist)]
+        gx, gw, gh = self.x0 + 10, self.pw - 20, 22
+        pts = [(gx + gw * i / 125, y + gh - gh * (v - lo) / (hi - lo)) for i, v in enumerate(hist)]
         if len(pts) > 1:
-            d.line(pts, fill=GREEN, width=1)
+            d.line(pts, fill=GREEN, width=2)
 
-        # keys and speed
-        y += 26
+        # the keys it's holding
+        y += gh + 10
         keys = [("W", action[0] == 2), ("A", action[1] == 0), ("S", action[0] == 0), ("D", action[1] == 2),
                 ("JUMP", action[2] == 1)]
-        kx = x0
+        kx = self.x0 + 10
         for k, on in keys:
             kw = 9 * len(k) + 12
             self._box(d, (kx, y, kx + kw, y + 22))
             d.text((kx + 6, y + 3), k, font=self.font, fill=AMBER if on else DIM)
             kx += kw + 6
-        speed = float(obs[3]) * 800
-        d.text((kx + 10, y + 3), f"{speed:4.0f} UPS", font=self.font, fill=GREEN)
         return img
 
 

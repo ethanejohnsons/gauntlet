@@ -72,7 +72,7 @@ Needs `cmake`, `ninja` and `zlib`. Build from the repo root:
 ```sh
 cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cmake
-ctest --test-dir build/cmake      # map load, strafe jump, thread determinism
+ctest --test-dir build/cmake      # map load, strafe jump, thread determinism, items/jump pads
 build/cmake/sim/bench             # steps per second across thread counts
 ```
 

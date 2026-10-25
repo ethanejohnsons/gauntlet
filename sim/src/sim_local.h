@@ -1,4 +1,5 @@
-// sim_local.h -- internal state shared by env.c (engine side) and game.c (game side)
+// sim_local.h -- internal state shared by the engine side (env.c, entities.c, world.c,
+// pool.c) and the game side (game.c)
 
 #ifndef SIM_LOCAL_H
 #define SIM_LOCAL_H
@@ -12,6 +13,8 @@
 #define GS_FIRST_ENTITY		MAX_CLIENTS		// map entities get numbers from here, like g_entities
 #define GS_MAX_ENTITIES		(MAX_GENTITIES - MAX_CLIENTS)
 #define GS_MAX_TARGETS		8
+#define GS_MAX_ITEMS		32		// powerup items tracked per env
+#define GS_ITEM_HIDDEN		0x7fffffff	// itemReady value: not present until used
 
 typedef enum {
 	GE_IGNORED,				// not relevant to movement (lights, info_null, ...)
@@ -29,6 +32,8 @@ typedef enum {
 	GE_TARGET_CHECKPOINT,
 	GE_TARGET_KILL,
 	GE_TARGET_TELEPORTER,
+	GE_TARGET_PUSH,
+	GE_ITEM_POWERUP,		// item_haste, item_flight
 } gsEntType_t;
 
 typedef struct {
@@ -38,7 +43,9 @@ typedef struct {
 	char			targetname[64];
 	int				spawnflags;
 	int				dmg;
+	int				count;
 	float			wait;
+	float			speed;
 	vec3_t			origin;
 	vec3_t			angles;
 
@@ -52,7 +59,12 @@ typedef struct {
 	int				targets[GS_MAX_TARGETS];
 	int				numTargets;
 
-	vec3_t			pushVelocity;	// trigger_push: s.origin2 from AimAtTarget
+	vec3_t			pushVelocity;	// trigger_push / target_push: s.origin2
+
+	// powerup items
+	int				powerup;		// PW_HASTE, PW_FLIGHT
+	int				quantity;		// seconds given per pickup
+	int				itemSlot;		// index into gs_env.itemReady
 } gsEnt_t;
 
 typedef struct {
@@ -63,6 +75,7 @@ typedef struct {
 	int				spawnEnt;		// index of the spawn point used, -1 if none
 	int				numUnsupported;
 	int				hasTimer;
+	int				numItems;
 } gsWorld_t;
 
 extern gsWorld_t gs_world;
@@ -81,7 +94,9 @@ struct gs_env {
 	int				checkpoints;
 	int				dead;
 
-	int				touchedStart;	// set during a step if the start trigger was touched
+	// item state is per player (each env races alone): the level time from
+	// which each powerup item can be picked up again
+	int				itemReady[GS_MAX_ITEMS];
 };
 
 // env.c
@@ -98,8 +113,9 @@ int		GS_EntitiesInBox( const vec3_t mins, const vec3_t maxs, int *list, int maxc
 int		GS_EntityContact( const vec3_t mins, const vec3_t maxs, const gsEnt_t *ent );
 
 // game.c (compiled with QVM float semantics)
-void	G_InitTriggers( void );
+void	G_InitEntities( void );
 void	G_SpawnPlayer( gs_env_t *env );
+void	G_PlacePlayer( gs_env_t *env, const vec3_t origin, const vec3_t velocity, float yaw );
 void	G_ClientThink( gs_env_t *env, const usercmd_t *cmd );
 
 #endif

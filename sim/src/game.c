@@ -1,6 +1,7 @@
 // game.c -- the parts of the Quake III game module that move a DeFRaG player:
-// spawning, ClientThink, trigger touches, teleports, jump pads and DeFRaG's timer
-// targets. Rewritten from id's 1.32 g_active.c / g_client.c / g_trigger.c / g_misc.c.
+// spawning, ClientThink, trigger touches, teleports, jump pads, target_push, powerup
+// items (haste, flight) and DeFRaG's timer targets. Rewritten from id's 1.32
+// g_active.c / g_client.c / g_trigger.c / g_misc.c / g_items.c / g_utils.c.
 // DeFRaG's own game code is closed source, so the timer behavior is our best
 // reading of it and is checked against the real mod (M2).
 //
@@ -56,10 +57,100 @@ static void AimAtTarget( gsEnt_t *self ) {
 	self->pushVelocity[2] = time * gravity;
 }
 
-void G_InitTriggers( void ) {
+/*
+=================
+G_SetMovedir (g_utils.c)
+
+The angle "-1" means up, "-2" down; anything else is a direction.
+=================
+*/
+static void G_SetMovedir( vec3_t angles, vec3_t movedir ) {
+	static const vec3_t VEC_UP		= {0, -1, 0};
+	static const vec3_t MOVEDIR_UP	= {0, 0, 1};
+	static const vec3_t VEC_DOWN		= {0, -2, 0};
+	static const vec3_t MOVEDIR_DOWN	= {0, 0, -1};
+
+	if ( VectorCompare (angles, VEC_UP) ) {
+		VectorCopy (MOVEDIR_UP, movedir);
+	} else if ( VectorCompare (angles, VEC_DOWN) ) {
+		VectorCopy (MOVEDIR_DOWN, movedir);
+	} else {
+		AngleVectors (angles, movedir, NULL, NULL);
+	}
+	VectorClear( angles );
+}
+
+/*
+=================
+SP_target_push (g_trigger.c)
+
+Pushes the activator along its angles at "speed", or towards its target like a jump pad.
+=================
+*/
+static void SP_target_push( gsEnt_t *self ) {
+	if (!self->speed) {
+		self->speed = 1000;
+	}
+	G_SetMovedir (self->angles, self->pushVelocity);
+	VectorScale (self->pushVelocity, self->speed, self->pushVelocity);
+
+	if ( self->target[0] ) {
+		VectorCopy( self->origin, self->absmin );
+		VectorCopy( self->origin, self->absmax );
+		AimAtTarget( self );	// frees it (GE_IGNORED) if the target is missing
+	}
+}
+
+/*
+=================
+FinishSpawningItem (g_items.c)
+
+Drop the item to the floor and link it as a trigger box.
+=================
+*/
+static void FinishSpawningItem( gsEnt_t *ent ) {
+	trace_t		tr;
+	vec3_t		dest;
+
+	VectorSet( ent->mins, -ITEM_RADIUS, -ITEM_RADIUS, -ITEM_RADIUS );
+	VectorSet( ent->maxs, ITEM_RADIUS, ITEM_RADIUS, ITEM_RADIUS );
+
+	if ( !( ent->spawnflags & 1 ) ) {
+		// drop to floor (spawnflag 1 is "suspended")
+		VectorSet( dest, ent->origin[0], ent->origin[1], ent->origin[2] - 4096 );
+		GS_Trace( &tr, ent->origin, ent->mins, ent->maxs, dest, ENTITYNUM_NONE, MASK_SOLID );
+		if ( tr.startsolid ) {
+			ent->type = GE_IGNORED;		// G_FreeEntity
+			return;
+		}
+		VectorCopy( tr.endpos, ent->origin );
+	}
+
+	// SV_LinkEntity
+	VectorAdd( ent->origin, ent->mins, ent->absmin );
+	VectorAdd( ent->origin, ent->maxs, ent->absmax );
+	for ( int i = 0; i < 3; i++ ) {
+		ent->absmin[i] -= 1;
+		ent->absmax[i] += 1;
+	}
+	ent->contents = CONTENTS_TRIGGER;
+}
+
+void G_InitEntities( void ) {
 	for ( int i = 0; i < gs_world.numEnts; i++ ) {
-		if ( gs_world.ents[i].type == GE_TRIGGER_PUSH ) {
-			AimAtTarget( &gs_world.ents[i] );
+		gsEnt_t *ent = &gs_world.ents[i];
+		switch ( ent->type ) {
+		case GE_TRIGGER_PUSH:
+			AimAtTarget( ent );
+			break;
+		case GE_TARGET_PUSH:
+			SP_target_push( ent );
+			break;
+		case GE_ITEM_POWERUP:
+			FinishSpawningItem( ent );
+			break;
+		default:
+			break;
 		}
 	}
 }
@@ -150,6 +241,16 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 	case GE_TARGET_KILL:
 		env->dead = 1;
 		break;
+	case GE_TARGET_PUSH:
+		// Use_target_push
+		if ( env->ps.pm_type == PM_NORMAL && !env->ps.powerups[PW_FLIGHT] ) {
+			VectorCopy( ent->pushVelocity, env->ps.velocity );
+		}
+		break;
+	case GE_ITEM_POWERUP:
+		// Use_Item: a targeted item appears when used
+		env->itemReady[ ent->itemSlot ] = 0;
+		break;
 	case GE_TARGET_TELEPORTER:
 		if ( ent->numTargets ) {
 			const gsEnt_t *dest = &gs_world.ents[ ent->targets[0] ];
@@ -159,6 +260,45 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 	default:
 		break;
 	}
+}
+
+/*
+=================
+Touch_Item / Pickup_Powerup (g_items.c), for powerups
+=================
+*/
+#define RESPAWN_POWERUP		120
+
+static void Touch_Item( gs_env_t *env, gsEnt_t *ent ) {
+	playerState_t *ps = &env->ps;
+	int respawn;
+
+	if ( ps->stats[STAT_HEALTH] < 1 ) {
+		return;		// dead people can't pickup
+	}
+
+	if ( !ps->powerups[ ent->powerup ] ) {
+		// round timing to seconds to make multiple powerup timers
+		// count in sync
+		ps->powerups[ ent->powerup ] = env->levelTime - ( env->levelTime % 1000 );
+	}
+	ps->powerups[ ent->powerup ] += ent->quantity * 1000;
+	respawn = RESPAWN_POWERUP;
+
+	// fire item targets
+	G_UseTargets( env, ent );
+
+	// wait of -1 will not respawn
+	if ( ent->wait == -1 ) {
+		env->itemReady[ ent->itemSlot ] = GS_ITEM_HIDDEN;
+		return;
+	}
+
+	// non zero wait overrides respawn time
+	if ( ent->wait ) {
+		respawn = ent->wait;
+	}
+	env->itemReady[ ent->itemSlot ] = env->levelTime + respawn * 1000;
 }
 
 /*
@@ -193,6 +333,24 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 		if ( !( hit->contents & CONTENTS_TRIGGER ) ) {
 			continue;
 		}
+
+		// use seperate code for determining if an item is picked up
+		// so you don't have to actually contact its bounding box
+		if ( hit->type == GE_ITEM_POWERUP ) {
+			if ( env->itemReady[ hit->itemSlot ] > env->levelTime ) {
+				continue;	// taken, not linked
+			}
+			entityState_t item;
+			memset( &item, 0, sizeof( item ) );
+			item.pos.trType = TR_STATIONARY;
+			VectorCopy( hit->origin, item.pos.trBase );
+			if ( !BG_PlayerTouchesItem( ps, &item, env->levelTime ) ) {
+				continue;
+			}
+			Touch_Item( env, hit );
+			continue;
+		}
+
 		if ( !GS_EntityContact( mins, maxs, hit ) ) {
 			continue;
 		}
@@ -251,6 +409,9 @@ void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 	ps->pm_type = env->dead ? PM_DEAD : PM_NORMAL;
 	ps->gravity = DEFAULT_GRAVITY;
 	ps->speed = DEFAULT_SPEED;
+	if ( ps->powerups[PW_HASTE] ) {
+		ps->speed *= 1.3;
+	}
 
 	memset( &pm, 0, sizeof( pm ) );
 	pm.ps = ps;
@@ -272,6 +433,13 @@ void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 	}
 
 	G_TouchTriggers( env, pm.mins, pm.maxs );
+
+	// ClientEndFrame: turn off any expired powerups
+	for ( int i = 0 ; i < MAX_POWERUPS ; i++ ) {
+		if ( ps->powerups[ i ] < env->levelTime ) {
+			ps->powerups[ i ] = 0;
+		}
+	}
 
 	if ( env->timerState == GS_TIMER_RUNNING ) {
 		env->timerMs = ps->commandTime - env->timerStart;
@@ -318,11 +486,50 @@ void G_SpawnPlayer( gs_env_t *env ) {
 	ps->pm_flags |= PMF_TIME_KNOCKBACK;
 	ps->pm_time = 100;
 
-	// run a client frame to drop exactly to the floor
+	// items are there from the start, except targeted ones (which wait to be used).
+	// Unlike baseq3, DeFRaG has no 45 s delay before powerups first appear.
+	for ( int i = 0; i < gs_world.numEnts; i++ ) {
+		const gsEnt_t *ent = &gs_world.ents[i];
+		if ( ent->type == GE_ITEM_POWERUP ) {
+			env->itemReady[ ent->itemSlot ] = ent->targetname[0] ? GS_ITEM_HIDDEN : 0;
+		}
+	}
+
 	env->levelTime = 1000;
+
+	// fire the targets of the spawn point
+	if ( gs_world.spawnEnt >= 0 ) {
+		G_UseTargets( env, &gs_world.ents[ gs_world.spawnEnt ] );
+	}
+
+	// run a client frame to drop exactly to the floor
 	ps->commandTime = env->levelTime - 100;
 	memset( &cmd, 0, sizeof( cmd ) );
 	cmd.serverTime = env->levelTime;
 	G_ClientThink( env, &cmd );
 	env->frame = 0;
+}
+
+/*
+=================
+G_PlacePlayer
+
+Put the player at a position with a velocity and view yaw (DeFRaG's placeplayer).
+Used for tests and for starting episodes partway through a map.
+=================
+*/
+void G_PlacePlayer( gs_env_t *env, const vec3_t origin, const vec3_t velocity, float yaw ) {
+	playerState_t *ps = &env->ps;
+	vec3_t angles;
+
+	VectorCopy( origin, ps->origin );
+	VectorCopy( velocity, ps->velocity );
+	ps->groundEntityNum = ENTITYNUM_NONE;
+	ps->pm_flags &= ~( PMF_TIME_KNOCKBACK | PMF_TIME_WATERJUMP | PMF_TIME_LAND );
+	ps->pm_time = 0;
+	ps->jumppad_ent = 0;
+	ps->jumppad_frame = 0;
+
+	VectorSet( angles, 0, yaw, 0 );
+	SetClientViewAngle( env, angles );
 }

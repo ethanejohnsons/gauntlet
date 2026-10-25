@@ -48,6 +48,8 @@ typedef struct {
 	int32_t	timer_ms;		// elapsed (running) or final (finished)
 	int32_t	checkpoints;	// distinct checkpoints touched since the timer started
 	int32_t	dead;
+	int32_t	haste_ms;		// haste time left, 0 if none
+	int32_t	flight_ms;
 } gs_state_t;
 
 typedef struct {
@@ -62,6 +64,17 @@ typedef struct {
 	float	world_maxs[3];
 } gs_map_info_t;
 
+// A map entity, for finding start/finish zones, checkpoints and the like.
+typedef struct {
+	char	classname[64];
+	char	target[64];
+	char	targetname[64];
+	float	origin[3];
+	float	absmin[3];		// linked bounds (brush models and items), else the origin
+	float	absmax[3];
+	int32_t	supported;		// 0 if it could affect movement but isn't simulated
+} gs_entity_t;
+
 typedef struct gs_env gs_env_t;
 
 // Load maps/<map>.bsp from <basepath>/<game>/*.pk3 or <basepath>/baseq3/*.pk3.
@@ -72,11 +85,16 @@ void		gs_map_info( gs_map_info_t *info );
 // Name and reason for each unsupported entity, one per line. Returns length written.
 int			gs_unsupported_entities( char *buf, int buflen );
 void		gs_set_verbose( int level );
+int			gs_num_entities( void );
+int			gs_entity( int index, gs_entity_t *out );	// 0 on success, -1 if out of range
 
 gs_env_t	*gs_env_new( void );
 void		gs_env_free( gs_env_t *env );
 void		gs_env_spawn( gs_env_t *env );			// at the map's spawn point
 void		gs_env_step( gs_env_t *env, const gs_cmd_t *cmd );
+// Put the player somewhere, like DeFRaG's placeplayer: origin, velocity and view yaw.
+// Timer, items and everything else are kept.
+void		gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw );
 void		gs_env_get_state( const gs_env_t *env, gs_state_t *out );
 
 // Whole-env snapshots, for start-state resets. Plain memory, safe to copy.

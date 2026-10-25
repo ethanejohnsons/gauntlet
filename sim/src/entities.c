@@ -27,6 +27,9 @@ static const classMap_t classMap[] = {
 	{ "target_checkpoint",		GE_TARGET_CHECKPOINT },
 	{ "target_kill",			GE_TARGET_KILL },
 	{ "target_teleporter",		GE_TARGET_TELEPORTER },
+	{ "target_push",			GE_TARGET_PUSH },
+	{ "item_haste",				GE_ITEM_POWERUP },
+	{ "item_flight",			GE_ITEM_POWERUP },
 
 	// no effect on movement while the player never fires
 	{ "light",					GE_IGNORED },
@@ -69,6 +72,20 @@ static gsEntType_t ClassType( const char *classname ) {
 	return GE_UNSUPPORTED;
 }
 
+// Fill in a powerup item from bg_itemlist. The item is linked later, once it has
+// dropped to the floor (G_InitEntities).
+static int SetupPowerup( gsEnt_t *ent ) {
+	for ( const gitem_t *it = bg_itemlist + 1; it->classname; it++ ) {
+		if ( !Q_stricmp( it->classname, ent->classname ) && it->giType == IT_POWERUP ) {
+			ent->powerup = it->giTag;
+			ent->quantity = ent->count ? ent->count : it->quantity;	// Pickup_Powerup
+			ent->itemSlot = gs_world.numItems++;
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void ParseVector( const char *s, vec3_t v ) {
 	VectorClear( v );
 	sscanf( s, "%f %f %f", &v[0], &v[1], &v[2] );
@@ -81,6 +98,7 @@ int GS_ParseEntities( void ) {
 	gs_world.numEnts = 0;
 	gs_world.spawnEnt = -1;
 	gs_world.numUnsupported = 0;
+	gs_world.numItems = 0;
 
 	while ( 1 ) {
 		const char *tok = COM_Parse( &p );
@@ -97,7 +115,7 @@ int GS_ParseEntities( void ) {
 		}
 		ent = &gs_world.ents[ gs_world.numEnts++ ];
 		memset( ent, 0, sizeof( *ent ) );
-		ent->wait = 0.5f;
+		float random = 0;
 
 		while ( 1 ) {
 			char key[MAX_TOKEN_CHARS];
@@ -134,10 +152,22 @@ int GS_ParseEntities( void ) {
 				ent->dmg = atoi( tok );
 			} else if ( !Q_stricmp( key, "wait" ) ) {
 				ent->wait = atof( tok );
+			} else if ( !Q_stricmp( key, "speed" ) ) {
+				ent->speed = atof( tok );
+			} else if ( !Q_stricmp( key, "count" ) ) {
+				ent->count = atoi( tok );
+			} else if ( !Q_stricmp( key, "random" ) ) {
+				random = atof( tok );
 			}
 		}
 
 		ent->type = ClassType( ent->classname );
+		if ( ent->type == GE_ITEM_POWERUP ) {
+			// a random respawn time can't be reproduced, so such maps aren't trusted
+			if ( random || gs_world.numItems == GS_MAX_ITEMS || !SetupPowerup( ent ) ) {
+				ent->type = GE_UNSUPPORTED;
+			}
+		}
 		if ( ent->type == GE_UNSUPPORTED ) {
 			gs_world.numUnsupported++;
 		}
@@ -210,3 +240,28 @@ int gs_unsupported_entities( char *buf, int buflen ) {
 	return len < buflen ? len : buflen - 1;
 }
 
+
+int gs_num_entities( void ) {
+	return gs_world.numEnts;
+}
+
+int gs_entity( int index, gs_entity_t *out ) {
+	if ( index < 0 || index >= gs_world.numEnts ) {
+		return -1;
+	}
+	const gsEnt_t *ent = &gs_world.ents[index];
+	memset( out, 0, sizeof( *out ) );
+	Q_strncpyz( out->classname, ent->classname, sizeof( out->classname ) );
+	Q_strncpyz( out->target, ent->target, sizeof( out->target ) );
+	Q_strncpyz( out->targetname, ent->targetname, sizeof( out->targetname ) );
+	VectorCopy( ent->origin, out->origin );
+	if ( ent->contents ) {
+		VectorCopy( ent->absmin, out->absmin );
+		VectorCopy( ent->absmax, out->absmax );
+	} else {
+		VectorCopy( ent->origin, out->absmin );
+		VectorCopy( ent->origin, out->absmax );
+	}
+	out->supported = ent->type != GE_UNSUPPORTED;
+	return 0;
+}

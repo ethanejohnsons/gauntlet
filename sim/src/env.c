@@ -63,7 +63,7 @@ int gs_load_map( const char *basepath, const char *game, const char *map ) {
 	if ( GS_ParseEntities() < 0 ) {
 		return -1;
 	}
-	G_InitTriggers();
+	G_InitEntities();
 	gs_world.loaded = 1;
 	return 0;
 }
@@ -118,6 +118,10 @@ void gs_env_step( gs_env_t *env, const gs_cmd_t *in ) {
 	env->frame++;
 }
 
+void gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw ) {
+	G_PlacePlayer( env, origin, velocity, yaw );
+}
+
 void gs_env_get_state( const gs_env_t *env, gs_state_t *out ) {
 	const playerState_t *ps = &env->ps;
 	VectorCopy( ps->origin, out->origin );
@@ -135,6 +139,8 @@ void gs_env_get_state( const gs_env_t *env, gs_state_t *out ) {
 	out->timer_ms = env->timerMs;
 	out->checkpoints = env->checkpoints;
 	out->dead = env->dead;
+	out->haste_ms = ps->powerups[PW_HASTE] ? ps->powerups[PW_HASTE] - env->levelTime : 0;
+	out->flight_ms = ps->powerups[PW_FLIGHT] ? ps->powerups[PW_FLIGHT] - env->levelTime : 0;
 }
 
 size_t gs_env_snapshot_size( void ) {

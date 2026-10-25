@@ -7,7 +7,7 @@ int GS_EntitiesInBox( const vec3_t mins, const vec3_t maxs, int *list, int maxco
 	int count = 0;
 	for ( int i = 0; i < gs_world.numEnts && count < maxcount; i++ ) {
 		const gsEnt_t *e = &gs_world.ents[i];
-		if ( !e->model || !e->contents ) {
+		if ( !e->contents ) {
 			continue;	// not linked
 		}
 		if ( e->absmin[0] > maxs[0] || e->absmin[1] > maxs[1] || e->absmin[2] > maxs[2]
@@ -65,7 +65,8 @@ void GS_Trace( trace_t *results, const vec3_t start, const vec3_t mins, const ve
 		if ( results->allsolid ) {
 			return;
 		}
-		if ( !( contentmask & e->contents ) ) {
+		// items are trigger boxes; nothing that moves the player traces against them
+		if ( !e->model || !( contentmask & e->contents ) ) {
 			continue;
 		}
 
@@ -100,6 +101,9 @@ int GS_PointContents( const vec3_t p, int passEntityNum ) {
 	int num = GS_EntitiesInBox( p, p, touch, GS_MAX_ENTITIES );
 	for ( int i = 0; i < num; i++ ) {
 		const gsEnt_t *e = &gs_world.ents[ touch[i] ];
+		if ( !e->model ) {
+			continue;	// items: see GS_Trace
+		}
 		contents |= CM_TransformedPointContents( p, e->model, e->origin, e->angles );
 	}
 	return contents;

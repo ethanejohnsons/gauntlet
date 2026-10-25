@@ -59,7 +59,7 @@ target_compile_options(gauntlet PRIVATE ${GS_FLOAT_FLAGS} -Wall -Wextra -Wno-unu
 target_link_libraries(gauntlet PRIVATE q3game q3 ZLIB::ZLIB Threads::Threads m)
 
 enable_testing()
-foreach(t test_map test_strafe test_threads)
+foreach(t test_map test_strafe test_threads test_items)
   add_executable(${t} tests/${t}.c)
   target_compile_options(${t} PRIVATE ${GS_FLOAT_FLAGS})
   target_link_libraries(${t} PRIVATE gauntlet m)

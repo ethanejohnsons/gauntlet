@@ -20,7 +20,10 @@ How it works, in short:
     .venv/bin/tensorboard --logdir runs/      # then open http://localhost:6006
 
 Outputs go to runs/<map>/<name>/: TensorBoard logs, agent.pt (the network), and
-best_progress.run / best_time.run.
+best_progress.run / best_time.run. Each best run also gets a .decisions.npz (what was
+chosen at every decision, and by which version of the network) and a .weights.pt
+(those versions), so tools/think_from_run.py can rebuild exactly what the network
+was thinking during it, for tools/overlay.py.
 """
 
 import argparse
@@ -105,6 +108,14 @@ def parse_args():
     return args
 
 
+def save_run(path, run, decisions, versions):
+    """A best run: its .run, its decisions and the network versions that made them."""
+    actions, used = decisions
+    runfile.write(path.with_suffix(".run"), run)
+    np.savez_compressed(path.with_suffix(".decisions.npz"), action=actions, version=used)
+    torch.save({int(v): versions[int(v)] for v in np.unique(used)}, path.with_suffix(".weights.pt"))
+
+
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
@@ -134,12 +145,20 @@ def main():
 
     obs = torch.tensor(env.reset(), device=device)
     best_progress, best_time = 0.0, None
+    versions = {}               # network version (update number) -> its weights
     practice_finishes = 0       # finishes from ammo restarts (practice, not real runs)
     episodes, decisions, update = 0, 0, 0
     start = time.time()
 
     while time.time() - start < args.minutes * 60:
         update += 1
+        # this rollout's network version: kept while a running episode or a restart
+        # point has a decision it made, so best runs can be saved with their weights
+        versions[update] = {k: v.detach().cpu().clone() for k, v in agent.state_dict().items()}
+        env.version = update
+        if update % 20 == 0:
+            in_use = env.versions_in_use() | {update}
+            versions = {v: w for v, w in versions.items() if v in in_use}
 
         # --- 1. play: collect a rollout -------------------------------------
         ended_progress, ended_returns, ended_finished = [], [], []
@@ -168,11 +187,11 @@ def main():
                         continue
                     if info["finished"][k] and (best_time is None or info["timer_ms"][k] < best_time):
                         best_time = int(info["timer_ms"][k])
-                        runfile.write(out / "best_time.run", env.make_run(info["runs"][i]))
+                        save_run(out / "best_time", env.make_run(info["runs"][i]), info["decisions"][i], versions)
                         print(f"  new best time: {best_time / 1000:.3f} s (episode {episodes})")
                     if info["progress"][k] > best_progress + 0.01:
                         best_progress = float(info["progress"][k])
-                        runfile.write(out / "best_progress.run", env.make_run(info["runs"][i]))
+                        save_run(out / "best_progress", env.make_run(info["runs"][i]), info["decisions"][i], versions)
 
         # --- 2. score: how much better than expected was each decision? ------
         # GAE (generalized advantage estimation): for each decision, the rewards

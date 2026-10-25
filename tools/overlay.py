@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Draw the network's thinking onto a rendered run, frame by frame.
 
-Takes the video from tools/render_run.sh and the thinking from tools/play_agent.py
-and writes a new video with a panel on the right:
+Takes the video from tools/render_run.sh and the thinking from tools/play_agent.py (or,
+for a best run from training, tools/think_from_run.py) and writes a new video with a
+panel on the right:
 
   - the network: inputs, two hidden layers (the 24 busiest neurons of each) and the
     outputs, lit by their real activations, with the strongest real connections
@@ -87,10 +88,13 @@ class Panel:
         self.label = label
         self.sel1 = busiest(think["hidden1"], SHOWN)
         self.sel2 = busiest(think["hidden2"], SHOWN)
-        # the real weights between the neurons that are drawn
-        self.w1 = agent["body.0.weight"].numpy()[self.sel1]                       # (24, inputs)
-        self.w2 = agent["body.2.weight"].numpy()[np.ix_(self.sel2, self.sel1)]    # (24, 24)
-        self.w3 = agent["policy.weight"].numpy()[:, self.sel2]                    # (19, 24)
+        # the real weights between the neurons that are drawn, per network version
+        # (a run from training was played by several; agent maps version -> weights)
+        self.weights = {v: (w["body.0.weight"].numpy()[self.sel1],                       # (24, inputs)
+                            w["body.2.weight"].numpy()[np.ix_(self.sel2, self.sel1)],    # (24, 24)
+                            w["policy.weight"].numpy()[:, self.sel2])                    # (outputs, 24)
+                        for v, w in agent.items()}
+        self.versions = think["version"] if "version" in think else np.full(len(think["frame"]), next(iter(agent)))
         self.values = think["value"]
 
         # layout, scaled from a 1280x720 frame: right edge, y 150..650
@@ -153,9 +157,10 @@ class Panel:
                     if strength > 0.05:
                         sx, sy = src_pts[i]
                         d.line([(sx, sy), (dx, dy)], fill=signed(np.sign(signal[i]) * (0.25 + 0.6 * strength)))
-        links(self.inputs, obs, self.h1, self.w1)
-        links(self.h1, h1, self.h2, self.w2)
-        links(self.h2, h2, self.outputs, self.w3, k=2)
+        w1, w2, w3 = self.weights[int(self.versions[d_index])]
+        links(self.inputs, obs, self.h1, w1)
+        links(self.h1, h1, self.h2, w2)
+        links(self.h2, h2, self.outputs, w3, k=2)
 
         # neurons: square pixels, lit by activation; outputs by probability, the pick in amber
         for (x, y), v in zip(self.inputs, obs):
@@ -212,7 +217,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video", help="mp4 from tools/render_run.sh")
     ap.add_argument("think", help=".think.npz from tools/play_agent.py")
-    ap.add_argument("agent", help="the agent.pt that made the run (for its connection weights)")
+    ap.add_argument("agent", help="the agent.pt that made the run, or the .weights.pt from "
+                                  "tools/think_from_run.py (for its connection weights)")
     ap.add_argument("--label", default="", help="text after AI PLAYING in the corner tag")
     ap.add_argument("--start", type=float, default=0, help="start the output this many seconds in")
     ap.add_argument("--end", type=float, default=None, help="end the output at this many seconds")
@@ -225,6 +231,8 @@ def main():
     base = int(replay_header["base"][0])          # game time of the run's frame 0
     think = dict(np.load(args.think))
     agent = torch.load(args.agent, map_location="cpu")
+    if "policy.weight" in agent:        # one network (an agent.pt), not versions from training
+        agent = {0: agent}
 
     probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
                             "stream=width,height,r_frame_rate", "-of", "csv=p=0", str(video)],

@@ -24,7 +24,9 @@ last leg (tatmt-s2's runs from the last checkpoint to the finish).
 Episodes also end after max_seconds, or after STUCK_SECONDS without getting closer to
 the current zone (players stuck in front of a jump make way for new episodes instead
 of waiting out the clock). Every frame's input is kept, so any episode can be
-exported as a .run file and replayed in the real game.
+exported as a .run file and replayed in the real game. So is every decision, with the
+network version that made it (set `version`), so the network's exact thinking during
+any episode can be rebuilt afterwards (tools/think_from_run.py).
 
 Restart points (as in Go-Explore): the env remembers a snapshot of the places
 players reach, one per cell (a leg, a slice of the run's progress, and what the
@@ -98,9 +100,10 @@ STUCK_SECONDS = 10          # an episode ends after this long without getting a 
 PROGRESS_CELLS = 100        # restart cells: slices of the run's progress per leg
 AMMO_RESTARTS = 0.5         # share of learner restarts that get back fired rockets
 
-# a remembered place to restart from: the env, and the episode so far
-# (held: the most rockets the player carried on the way there)
-Restart = collections.namedtuple("Restart", "snapshot leg frames history returns recent held")
+# a remembered place to restart from: the env, and the episode so far (held: the most
+# rockets the player carried on the way there; decisions and versions: what was
+# chosen at each decision, and by which network version)
+Restart = collections.namedtuple("Restart", "snapshot leg frames history returns recent held decisions versions")
 
 
 def _ptr(array):
@@ -108,8 +111,10 @@ def _ptr(array):
 
 
 class VecEnv:
-    def __init__(self, mapname, num_envs, max_seconds=30, threads=None, restart_fraction=0.0, scouts=0):
+    def __init__(self, mapname, num_envs, max_seconds=30, threads=None, restart_fraction=0.0, scouts=0,
+                 stuck_seconds=STUCK_SECONDS):
         self.map = mapname
+        self.stuck_frames = stuck_seconds * 1000 / sim.FRAME_MSEC if stuck_seconds else np.inf
         self.n = num_envs
         self.threads = threads or os.cpu_count()
         self.max_frames = int(max_seconds * 1000 / sim.FRAME_MSEC)
@@ -159,6 +164,11 @@ class VecEnv:
         # every frame's input since each env's episode started, for exporting runs
         self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 8), np.int32)
         self.frames = np.zeros(self.n, np.int64)
+        # every decision since each env's episode started (the actions as played), and
+        # the network version that made it
+        self.version = 0
+        self.decisions = np.zeros((self.n, self.max_frames // FRAMES_PER_ACTION + 1, len(ACTION_SIZES)), np.int8)
+        self.decision_versions = np.zeros(self.decisions.shape[:2], np.int32)
         self.returns = np.zeros(self.n, np.float32)    # reward so far this episode
         # the reward of each of the last DEATH_WINDOW seconds' decisions since the last
         # zone, a ring indexed by self.tick (the slot of tick % size is the oldest)
@@ -198,6 +208,18 @@ class VecEnv:
         """Player i's recent rewards, oldest first (np.roll by self.tick puts them back)."""
         return np.roll(self.recent[i], -self.tick)
 
+    def _decisions_of(self, i):
+        """Player i's decisions this episode, and the network version of each."""
+        d = self.frames[i] // FRAMES_PER_ACTION
+        return self.decisions[i, :d].copy(), self.decision_versions[i, :d].copy()
+
+    def versions_in_use(self):
+        """The network versions that made a decision of a running episode or of a
+        remembered restart point (the trainer can forget the others)."""
+        used = [self.decision_versions[i, :self.frames[i] // FRAMES_PER_ACTION] for i in range(self.n)]
+        used += [kept.versions for kept in self.restarts.values()]
+        return set(np.unique(np.concatenate(used)).tolist()) if used else set()
+
     def _cells(self, indices):
         """The restart cell each player is in: leg, progress slice, and what it carries."""
         s = self.states[indices]
@@ -221,7 +243,7 @@ class VecEnv:
                 self.restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
                                               self.history[i, :self.frames[i]].copy(),
                                               float(self.returns[i]), self._recent_in_order(i),
-                                              int(self.held[i]))
+                                              int(self.held[i]), *self._decisions_of(i))
 
     def _restart(self, indices):
         """Start new episodes: from the spawn, or (restart_fraction of them) from a
@@ -250,6 +272,8 @@ class VecEnv:
                 self.returns[i] = kept.returns
                 self.recent[i] = np.roll(kept.recent, self.tick)
                 self.held[i] = kept.held
+                self.decisions[i, :len(kept.decisions)] = kept.decisions
+                self.decision_versions[i, :len(kept.versions)] = kept.versions
                 rockets = (picks[i] % 8) // 2
                 if not self.scout[i] and rockets < kept.held and self.rng.random() < AMMO_RESTARTS:
                     self.lib.gs_env_set_ammo(self.envs[i], sim.WP_ROCKET_LAUNCHER, kept.held)
@@ -291,6 +315,10 @@ class VecEnv:
         self.cmds["weapon"] = np.where(has_rl, sim.WP_ROCKET_LAUNCHER, 0)
         self.cmds["angles"][:, 0] = ((pitch * 65536 / 360).astype(np.int64) - delta[:, 0]) & 65535
         everyone = np.arange(self.n)
+        played = actions.copy()
+        played[self.scout, 4] = 0
+        self.decisions[everyone, self.frames // FRAMES_PER_ACTION] = played
+        self.decision_versions[everyone, self.frames // FRAMES_PER_ACTION] = self.version
         for _ in range(FRAMES_PER_ACTION):
             yaw += turn
             self.cmds["angles"][:, 1] = ((yaw * 65536 / 360).astype(np.int64) - delta[:, 1]) & 65535
@@ -316,7 +344,7 @@ class VecEnv:
         closer = self.route < self.closest - 16
         self.closest = np.where(closer, self.route, self.closest)
         self.closer_frame = np.where(closer, self.frames, self.closer_frame)
-        timeout |= self.frames - self.closer_frame > STUCK_SECONDS * 1000 / sim.FRAME_MSEC
+        timeout |= self.frames - self.closer_frame > self.stuck_frames
 
         # reaching the current leg's zone: the start zone starts the timer, a
         # checkpoint zone is reached when the route to it is (about) zero
@@ -367,6 +395,7 @@ class VecEnv:
                                                     self.leg[ended])),
             }
             info["runs"] = {i: self.history[i, :self.frames[i]].copy() for i in ended}
+            info["decisions"] = {i: self._decisions_of(i) for i in ended}
             self._restart(ended)
             self._observe()
         return self.obs.copy(), reward.astype(np.float32), done, info

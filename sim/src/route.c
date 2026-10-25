@@ -13,9 +13,9 @@
 // Gravity is only roughly accounted for, with two costs:
 //  - climbing costs CLIMB_COST times as much as moving sideways or down, so the route
 //    goes around tall walls rather than over them, and happily drops down holes;
-//  - moving sideways through "air" (no floor within SUPPORT_HEIGHT below) costs
-//    AIR_COST times as much, so the route jumps gaps when it has to, but takes the
-//    long way around a gap nobody could jump.
+//  - moving sideways through "air" (no floor within SUPPORT_HEIGHT below, or only
+//    one inside a kill zone) costs AIR_COST times as much, so the route jumps gaps
+//    when it has to, but takes the long way around a gap nobody could jump.
 // That's what we want for a reward. It says which way is forward and how far is left,
 // and leaves *how* to get there (jumping, strafing) to the player.
 
@@ -350,11 +350,15 @@ int gs_route_build( float cell ) {
 			&& !TouchesAny( center, t.deadly, t.numDeadly );
 		open[c] = isOpen ? UNREACHED : -1;
 		if ( isOpen ) {
-			vec3_t below;
+			// air: no floor close below, or the floor is inside a kill zone (standing
+			// on it would kill, so it's no use for getting anywhere)
+			vec3_t below, standing;
 			VectorCopy( center, below );
 			below[2] -= SUPPORT_HEIGHT;
 			GS_Trace( &tr, center, NULL, NULL, below, GS_PLAYER_NUM, MASK_PLAYERSOLID );
-			route.air[c] = tr.fraction == 1.0f;
+			VectorCopy( tr.endpos, standing );
+			standing[2] += 24;		// a standing player's origin on that floor
+			route.air[c] = tr.fraction == 1.0f || TouchesAny( standing, t.deadly, t.numDeadly );
 		}
 	}
 

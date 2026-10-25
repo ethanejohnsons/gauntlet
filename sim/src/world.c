@@ -50,6 +50,9 @@ static const struct {
 	{ "item_haste",				GE_ITEM_POWERUP },
 	{ "item_flight",			GE_ITEM_POWERUP },
 
+	// target_give is left out on purpose: it can hand out a weapon a map needs (a
+	// rocket jump over a gap), which the sim can't do yet, so it counts as unsupported
+
 	// no effect on movement while the player never fires
 	{ "worldspawn",				GE_IGNORED },
 	{ "light",					GE_IGNORED },
@@ -61,7 +64,6 @@ static const struct {
 	{ "target_smallprint",		GE_IGNORED },
 	{ "target_location",		GE_IGNORED },
 	{ "target_init",			GE_IGNORED },
-	{ "target_give",			GE_IGNORED },
 	{ "target_remove_powerups",	GE_IGNORED },
 	{ "misc_portal_surface",	GE_IGNORED },
 	{ "misc_portal_camera",		GE_IGNORED },

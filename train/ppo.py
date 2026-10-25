@@ -251,6 +251,7 @@ def main():
                   f"episodes {episodes:8d}  progress mean {mean_progress:5.1%} best {best_progress:5.1%}"
                   + (f"  best time {best_time / 1000:.3f} s" if best_time else "")
                   + (f"  restart cells {len(env.restarts)}" if env.restarts else "")
+                  + (f" (+{len(env.practice_restarts)} practice)" if env.practice_restarts else "")
                   + (f"  practice finishes {practice_finishes}" if practice_finishes else ""))
 
     torch.save(agent.state_dict(), out / "agent.pt")

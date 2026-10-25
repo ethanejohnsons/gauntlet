@@ -49,9 +49,12 @@ where the learners' restarts go first.
 Ammo restarts go further: when a learner restarts from a place it reached after
 firing, AMMO_RESTARTS of the time it gets back the rockets it had picked up, as if it
 had kept them. That lets the AI practise a jump that needs a rocket at the end of a
-map before it has learned to keep one that long. Such an episode never happened in
-a real run, so it is marked synthetic: it isn't exported, doesn't count for the
-best runs or averages, and isn't remembered as a restart point.
+map before it has learned to keep one that long. Such a practice episode never
+happened in a real run, so it is marked synthetic: it isn't exported and doesn't
+count for the best runs or averages. Its visits count separately (so it doesn't hide
+the real restart points it passes), and the places it reaches are remembered as
+practice-only restart points: restarting from one is practice too. That way practice
+can carry on past a rocket jump to the end of the map.
 """
 
 import collections
@@ -182,8 +185,10 @@ class VecEnv:
         self.seen = [set() for _ in range(self.n)]
         self.scout = np.arange(self.n) >= self.n - scouts
         self.restarts = {}
+        self.practice_restarts = {}                    # remembered by practice episodes
         self.visits = collections.Counter()
         self.scout_visits = collections.Counter()
+        self.practice_visits = collections.Counter()
         self.from_spawn = np.ones(self.n, bool)        # this episode started at the spawn
         self.synthetic = np.zeros(self.n, bool)        # it started from an ammo restart
         self.held = np.zeros(self.n, np.int32)         # most rockets carried this episode
@@ -233,14 +238,16 @@ class VecEnv:
         if this is the fastest anyone has got there."""
         cells = self._cells(indices)
         for i, cell in zip(indices, cells):
+            visits = self.scout_visits if self.scout[i] else self.practice_visits if self.synthetic[i] else self.visits
             if cell not in self.seen[i]:
                 self.seen[i].add(cell)
-                (self.scout_visits if self.scout[i] else self.visits)[cell] += 1
-            kept = self.restarts.get(cell)
-            if not self.synthetic[i] and (kept is None or self.frames[i] < kept.frames):
+                visits[cell] += 1
+            restarts = self.practice_restarts if self.synthetic[i] else self.restarts
+            kept = restarts.get(cell)
+            if kept is None or self.frames[i] < kept.frames:
                 snapshot = C.create_string_buffer(len(self.snapshot))
                 self.lib.gs_env_save(self.envs[i], snapshot)
-                self.restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
+                restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
                                               self.history[i, :self.frames[i]].copy(),
                                               float(self.returns[i]), self._recent_in_order(i),
                                               int(self.held[i]), *self._decisions_of(i))
@@ -248,23 +255,29 @@ class VecEnv:
     def _restart(self, indices):
         """Start new episodes: from the spawn, or (restart_fraction of them) from a
         remembered cell, picked with weight 1 / sqrt(episodes that reached it + 1).
-        Scouts pick only from cells where they'd still carry rockets."""
-        learner_cells = list(self.restarts)
-        scout_cells = [c for c in learner_cells if (c % 8) // 2 > 0]
+        Learners pick from the real and the practice-only cells (each counted by its
+        own kind of episode); scouts only from real cells where they'd carry rockets."""
+        # (restart point, is it practice-only) for each choice
+        learner_cells = [(c, False) for c in self.restarts] + [(c, True) for c in self.practice_restarts]
+        scout_cells = [(c, False) for c in self.restarts if (c % 8) // 2 > 0]
         restart = self.rng.random(len(indices)) < self.restart_fraction
         restart &= np.where(self.scout[indices], len(scout_cells) > 0, len(learner_cells) > 0)
         picks = {}
-        for scouts, cells, visits in ((False, learner_cells, self.visits), (True, scout_cells, self.scout_visits)):
+        for scouts, cells in ((False, learner_cells), (True, scout_cells)):
             group = restart & (self.scout[indices] == scouts)
             if group.any():
-                weight = 1 / np.sqrt(np.array([visits[c] for c in cells]) + 1)
+                visits = [(self.practice_visits if practice else self.scout_visits if scouts else self.visits)[c]
+                          for c, practice in cells]
+                weight = 1 / np.sqrt(np.array(visits) + 1)
                 chosen = self.rng.choice(len(cells), size=group.sum(), p=weight / weight.sum())
                 picks.update(zip(indices[group], (cells[c] for c in chosen)))
         self.synthetic[indices] = False
         for k, i in enumerate(indices):
             self.seen[i] = set()
             if restart[k]:
-                kept = self.restarts[picks[i]]
+                cell, practice = picks[i]
+                kept = (self.practice_restarts if practice else self.restarts)[cell]
+                self.synthetic[i] = practice
                 self.lib.gs_env_restore(self.envs[i], kept.snapshot)
                 self._set_leg(i, kept.leg)
                 self.frames[i] = kept.frames
@@ -274,8 +287,8 @@ class VecEnv:
                 self.held[i] = kept.held
                 self.decisions[i, :len(kept.decisions)] = kept.decisions
                 self.decision_versions[i, :len(kept.versions)] = kept.versions
-                rockets = (picks[i] % 8) // 2
-                if not self.scout[i] and rockets < kept.held and self.rng.random() < AMMO_RESTARTS:
+                rockets = (cell % 8) // 2
+                if not practice and not self.scout[i] and rockets < kept.held and self.rng.random() < AMMO_RESTARTS:
                     self.lib.gs_env_set_ammo(self.envs[i], sim.WP_ROCKET_LAUNCHER, kept.held)
                     self.synthetic[i] = True
             else:

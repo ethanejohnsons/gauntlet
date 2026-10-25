@@ -54,9 +54,6 @@ static const struct {
 	{ "ammo_rockets",			GE_ITEM },
 	{ "target_give",			GE_TARGET_GIVE },
 
-	// target_give is left out on purpose: it can hand out a weapon a map needs (a
-	// rocket jump over a gap), which the sim can't do yet, so it counts as unsupported
-
 	// no effect on movement while the player never fires
 	{ "worldspawn",				GE_IGNORED },
 	{ "light",					GE_IGNORED },

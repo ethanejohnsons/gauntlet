@@ -4,8 +4,9 @@
 How it works, in short:
 
 1. Play. 1024 copies of the AI race the map in the sim at once. Every 32 ms each
-   one looks at its observation (45 numbers: its motion, distances to walls, the
-   route ahead; see gauntlet.h) and the network picks keys and a turn rate.
+   one looks at its observation (52 numbers: its motion, distances to walls, the
+   route ahead, health and weapon; see gauntlet.h) and the network picks keys, a
+   turn rate, whether to fire, and where to aim.
 2. Score. Each decision earns a reward: getting closer to the finish is good,
    finishing is very good, dying is bad (py/gauntlet/env.py).
 3. Learn. After ROLLOUT decisions per player, the network is nudged so that
@@ -93,6 +94,8 @@ def parse_args():
     ap.add_argument("--entropy", type=float, default=0.01, help="bonus for staying curious")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--init", help="start from this agent.pt instead of a fresh network")
+    ap.add_argument("--restarts", type=float, default=0.25,
+                    help="share of episodes that start from a remembered place instead of the spawn")
     return ap.parse_args()
 
 
@@ -105,7 +108,8 @@ def main():
     writer = SummaryWriter(out)
     writer.add_text("args", str(vars(args)))
 
-    env = VecEnv(args.map, args.envs, max_seconds=args.max_seconds, threads=args.threads)
+    env = VecEnv(args.map, args.envs, max_seconds=args.max_seconds, threads=args.threads,
+                 restart_fraction=args.restarts)
     agent = Agent().to(device)
     if args.init:
         agent.load_state_dict(torch.load(args.init, map_location=device))
@@ -143,10 +147,12 @@ def main():
             decisions += N
 
             if info:
+                # (the averages count only episodes that started at the spawn)
+                spawn = info["from_spawn"]
                 episodes += len(info["ended"])
-                ended_progress += list(info["progress"])
-                ended_returns += list(info["returns"])
-                ended_finished += list(info["finished"])
+                ended_progress += list(info["progress"][spawn])
+                ended_returns += list(info["returns"][spawn])
+                ended_finished += list(info["finished"][spawn])
                 for k, i in enumerate(info["ended"]):
                     # keep the best runs so far, to watch in the real game
                     if info["finished"][k] and (best_time is None or info["timer_ms"][k] < best_time):
@@ -211,7 +217,8 @@ def main():
             mean_progress = np.mean(ended_progress) if ended_progress else 0
             print(f"update {update:5d}  {elapsed / 60:5.1f} min  {decisions / 1e6:7.1f}M decisions  "
                   f"episodes {episodes:8d}  progress mean {mean_progress:5.1%} best {best_progress:5.1%}"
-                  + (f"  best time {best_time / 1000:.3f} s" if best_time else ""))
+                  + (f"  best time {best_time / 1000:.3f} s" if best_time else "")
+                  + (f"  restart cells {len(env.restarts)}" if env.restarts else ""))
 
     torch.save(agent.state_dict(), out / "agent.pt")
     writer.close()

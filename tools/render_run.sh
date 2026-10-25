@@ -8,6 +8,11 @@
 #
 # Output: build/video/<name>.mp4. Engine files go to build/q3home (a separate
 # fs_homepath), so your own ~/.q3a config isn't touched.
+#
+# The video is filmed from a chase camera behind the player, which follows the
+# direction of travel rather than the view (easier to watch when a bot whips its view
+# around); CAMERA=eyes films through the player's eyes instead. The camera is part of
+# the private engine patches; without them the video is always first person.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,6 +22,12 @@ HOME_Q3="$ROOT/build/q3home"
 ENGINE="$ROOT/build/odfe/release-linux-x86_64/oDFe.x64"
 WIDTH="${WIDTH:-1280}"
 HEIGHT="${HEIGHT:-720}"
+CAMERA="${CAMERA:-chase}"
+case "$CAMERA" in
+	chase) CAMERA_SETTINGS=(+set gs_chasecam 1 +set cg_drawCrosshair 0 +set cg_bobup 0 +set cg_bobpitch 0 +set cg_bobroll 0) ;;
+	eyes)  CAMERA_SETTINGS=(+set gs_chasecam 0) ;;
+	*)     echo "CAMERA must be chase or eyes" >&2; exit 1 ;;
+esac
 
 [[ -x "$ENGINE" ]] || "$ROOT/engine/build.sh"
 mkdir -p "$HOME_Q3/defrag/runs" "$ROOT/build/video"
@@ -53,7 +64,7 @@ grep 'gs_replay:' "$ROOT/build/odfe-$NAME.log" | tail -1
 python3 "$ROOT/tools/compare_run.py" "$HOME_Q3/defrag/runs/$NAME.run" "$HOME_Q3/defrag/gs_replay.log" || true
 
 echo "rendering the demo..."
-engine +set cl_aviFrameRate 60 +set nextdemo quit +demo "gs_$NAME" +wait 3 +video-pipe "gs_$NAME"
+engine "${CAMERA_SETTINGS[@]}" +set cl_aviFrameRate 60 +set nextdemo quit +demo "gs_$NAME" +wait 3 +video-pipe "gs_$NAME"
 cp "$HOME_Q3/defrag/videos/gs_$NAME.mp4" "$ROOT/build/video/$NAME.mp4"
 # timing logs, for drawing overlays (tools/overlay.py)
 cp "$HOME_Q3/defrag/gs_video.log" "$ROOT/build/video/$NAME.video.log"

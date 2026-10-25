@@ -7,10 +7,12 @@ Vulkan headers, libjpeg, ogg and vorbis are bundled with oDFe, so nothing else i
 
 ```sh
 git submodule update --init
-make -C engine/oDFe -j16 release BUILD_DIR=$PWD/build/odfe
+engine/build.sh
 ```
 
-The build is out-of-tree, so the submodule stays clean. Output in `build/odfe/release-linux-x86_64/`:
+The script copies the submodule to `build/odfe-src`, applies `engine/patches/` (the private
+`gs_replay` input replay, see [engine/patches/README.md](../engine/patches/README.md)) and
+builds there, so the submodule stays clean. Output in `build/odfe/release-linux-x86_64/`:
 
 | File | What |
 |---|---|
@@ -90,3 +92,26 @@ make sure of it), so either is fine for development.
 Open the repo root. CLion picks up the top-level `CMakeLists.txt`. Run or debug the
 `test_strafe` target, and set a breakpoint in `G_ClientThink` (`sim/src/game.c`) to step
 through a player frame. CLion's own `cmake-build-*` folders and `.idea/` are git-ignored.
+
+## Watch a sim run in the real game
+
+Render a bot run to video. This runs off-screen, with no game window:
+
+```sh
+tools/render_run.sh df_vq3x-1 strafe      # -> build/video/df_vq3x-1_strafe.mp4
+```
+
+It simulates the run, replays it in the patched oDFe, compares every frame the engine
+reports with the sim (`tools/compare_run.py`), then renders the recorded demo with
+`video-pipe`. Engine files go to `build/q3home`, not `~/.q3a`.
+
+Or watch it live in the game window:
+
+```sh
+python3 tools/export_run.py vanilla_01     # writes ~/.q3a/defrag/runs/vanilla_01_strafe.run
+tools/play.sh vanilla_01
+```
+
+In the game, open the console (`~`) and type `/gs_replay runs/vanilla_01_strafe.run`.
+Keyboard and mouse are ignored while it plays; `/gs_replay_stop` stops it. The run's
+first second is standing still, which lines the engine player up with the sim.

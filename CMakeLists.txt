@@ -8,10 +8,10 @@ project(gauntlet C)
 enable_testing()
 add_subdirectory(sim)
 
-# Build the engine out-of-tree (not part of the default build): cmake --build <dir> --target odfe
+# Build the engine with engine/patches applied (not part of the default build):
+#   cmake --build <dir> --target odfe
 add_custom_target(odfe
-  COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/engine/oDFe -j release
-          BUILD_DIR=${CMAKE_CURRENT_SOURCE_DIR}/build/odfe
+  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/engine/build.sh
   USES_TERMINAL
-  COMMENT "Building oDFe into build/odfe"
+  COMMENT "Building patched oDFe into build/odfe"
 )

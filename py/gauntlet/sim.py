@@ -1,0 +1,130 @@
+"""ctypes binding for libgauntlet (sim/include/gauntlet.h).
+
+The structs below must match gauntlet.h field for field.
+"""
+
+import ctypes as C
+import os
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+FRAME_MSEC = 8
+
+
+def default_q3_path():
+    return os.environ.get("GAUNTLET_Q3", str(Path.home() / "Games/quake3"))
+
+
+class Cmd(C.Structure):
+    _fields_ = [("angles", C.c_int32 * 3), ("forward", C.c_int8), ("right", C.c_int8),
+                ("up", C.c_int8), ("buttons", C.c_uint8)]
+
+
+class State(C.Structure):
+    _fields_ = [("origin", C.c_float * 3), ("velocity", C.c_float * 3),
+                ("viewangles", C.c_float * 3), ("delta_angles", C.c_int32 * 3),
+                ("command_time", C.c_int32), ("pm_flags", C.c_int32), ("pm_time", C.c_int32),
+                ("ground_entity", C.c_int32), ("frame", C.c_int32), ("timer_state", C.c_int32),
+                ("timer_ms", C.c_int32), ("checkpoints", C.c_int32), ("dead", C.c_int32),
+                ("haste_ms", C.c_int32), ("flight_ms", C.c_int32)]
+
+
+class MapInfo(C.Structure):
+    _fields_ = [("mapname", C.c_char * 64), ("source", C.c_char * 512),
+                ("num_entities", C.c_int32), ("num_unsupported", C.c_int32),
+                ("has_timer", C.c_int32), ("spawn_origin", C.c_float * 3),
+                ("spawn_angles", C.c_float * 3), ("world_mins", C.c_float * 3),
+                ("world_maxs", C.c_float * 3)]
+
+
+class Entity(C.Structure):
+    _fields_ = [("classname", C.c_char * 64), ("target", C.c_char * 64),
+                ("targetname", C.c_char * 64), ("origin", C.c_float * 3),
+                ("absmin", C.c_float * 3), ("absmax", C.c_float * 3), ("supported", C.c_int32)]
+
+
+Vec3 = C.c_float * 3
+
+_lib = None
+
+
+def lib():
+    """Load libgauntlet once (from $GAUNTLET_LIB or the default CMake build folder)."""
+    global _lib
+    if _lib is None:
+        path = os.environ.get("GAUNTLET_LIB", str(ROOT / "build/cmake/sim/libgauntlet.so"))
+        L = C.CDLL(path)
+        L.gs_load_map.argtypes = [C.c_char_p, C.c_char_p, C.c_char_p]
+        L.gs_last_error.restype = C.c_char_p
+        L.gs_map_info.argtypes = [C.POINTER(MapInfo)]
+        L.gs_num_entities.restype = C.c_int
+        L.gs_entity.argtypes = [C.c_int, C.POINTER(Entity)]
+        L.gs_env_new.restype = C.c_void_p
+        L.gs_env_free.argtypes = [C.c_void_p]
+        L.gs_env_spawn.argtypes = [C.c_void_p]
+        L.gs_env_step.argtypes = [C.c_void_p, C.POINTER(Cmd)]
+        L.gs_env_get_state.argtypes = [C.c_void_p, C.POINTER(State)]
+        L.gs_env_place.argtypes = [C.c_void_p, Vec3, Vec3, C.c_float]
+        L.gs_trace.argtypes = [Vec3, Vec3, C.c_void_p, C.c_void_p, Vec3]
+        L.gs_trace.restype = C.c_float
+        _lib = L
+    return _lib
+
+
+def load_map(name, q3_path=None, game="defrag"):
+    L = lib()
+    if L.gs_load_map((q3_path or default_q3_path()).encode(), game.encode(), name.encode()) < 0:
+        raise RuntimeError(L.gs_last_error().decode())
+    info = MapInfo()
+    L.gs_map_info(C.byref(info))
+    return info
+
+
+def entities():
+    """All map entities as dicts."""
+    L = lib()
+    out, e = [], Entity()
+    for i in range(L.gs_num_entities()):
+        L.gs_entity(i, C.byref(e))
+        out.append({"classname": e.classname.decode(), "target": e.target.decode(),
+                    "targetname": e.targetname.decode(), "origin": tuple(e.origin),
+                    "absmin": tuple(e.absmin), "absmax": tuple(e.absmax),
+                    "supported": bool(e.supported)})
+    return out
+
+
+def trace(start, end, endpos=None):
+    """Point trace through the world; returns (fraction, endpos)."""
+    hit = Vec3()
+    frac = lib().gs_trace(Vec3(*start), Vec3(*end), None, None, hit)
+    return frac, (hit[0], hit[1], hit[2])
+
+
+class Env:
+    """One simulated player on the loaded map."""
+
+    def __init__(self):
+        self._lib = lib()
+        self._env = self._lib.gs_env_new()
+        self.state = State()
+
+    def __del__(self):
+        if getattr(self, "_env", None):
+            self._lib.gs_env_free(self._env)
+
+    def spawn(self):
+        self._lib.gs_env_spawn(self._env)
+        return self.get_state()
+
+    def step(self, cmd):
+        self._lib.gs_env_step(self._env, C.byref(cmd))
+        return self.get_state()
+
+    def get_state(self):
+        self._lib.gs_env_get_state(self._env, C.byref(self.state))
+        return self.state
+
+
+def cmd_angle(deg, delta):
+    """Raw 16-bit cmd angle that makes the view look at `deg`, given delta_angles."""
+    return ((int(deg * 65536 / 360) & 65535) - delta) & 65535

@@ -33,3 +33,8 @@ __pycache__/
 *.local.toml
 *.local.json
 .env
+
+# IDE
+.idea/
+cmake-build-*/
+.vscode/

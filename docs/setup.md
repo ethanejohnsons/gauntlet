@@ -64,3 +64,29 @@ The pk3 count depends on which extra maps are installed. Lines like `fs_game is 
 are harmless: the `+set` values were already applied at startup.
 
 Never use `dedicated 2` (public, sends heartbeats to master servers).
+
+## Build and test libgauntlet (the sim)
+
+Needs `cmake`, `ninja` and `zlib`. Build from the repo root:
+
+```sh
+cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build/cmake
+ctest --test-dir build/cmake      # map load, strafe jump, thread determinism
+build/cmake/sim/bench             # steps per second across thread counts
+```
+
+`cmake --build build/cmake --target odfe` builds the engine too.
+
+The tests read game data from `$GAUNTLET_Q3` (default `~/Games/quake3`). Any test takes a
+map name as its argument, e.g. `build/cmake/sim/test_map vanilla_02`, which also lists the
+map's entities the sim doesn't handle yet.
+
+Debug and Release builds give bit-identical physics (the float flags in `sim/CMakeLists.txt`
+make sure of it), so either is fine for development.
+
+## CLion
+
+Open the repo root. CLion picks up the top-level `CMakeLists.txt`. Run or debug the
+`test_strafe` target, and set a breakpoint in `G_ClientThink` (`sim/src/game.c`) to step
+through a player frame. CLion's own `cmake-build-*` folders and `.idea/` are git-ignored.

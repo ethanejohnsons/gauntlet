@@ -233,8 +233,12 @@ timer targets, kills, teleports, pushes, and items appearing.
 static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 	switch ( ent->type ) {
 	case GE_TARGET_START_TIMER:
-		// Touching the start zone keeps restarting the timer, so in effect the
-		// run starts on the last frame inside it.
+		// DeFRaG starts the timer as the player enters the start zone (checked
+		// against its checkpoint split times), and again on re-entering it.
+		env->touchedStart = 1;
+		if ( env->inStartZone ) {
+			break;
+		}
 		env->timerState = GS_TIMER_RUNNING;
 		env->timerStart = env->ps.commandTime;
 		env->timerMs = 0;
@@ -342,6 +346,7 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 	if ( env->dead ) {
 		return;
 	}
+	env->touchedStart = 0;
 
 	VectorSubtract( ps->origin, range, mins );
 	VectorAdd( ps->origin, range, maxs );
@@ -410,6 +415,8 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 			return;
 		}
 	}
+
+	env->inStartZone = env->touchedStart;
 
 	// if we didn't touch a jump pad this pmove frame
 	if ( ps->jumppad_frame != ps->pmove_framecount ) {

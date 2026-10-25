@@ -116,7 +116,9 @@ struct gs_env {
 	int				frame;			// commands processed since spawn
 
 	int				timerState;		// GS_TIMER_*
-	int				timerStart;		// commandTime when the start trigger was last touched
+	int				timerStart;		// commandTime when the player last entered the start zone
+	int				inStartZone;	// touching a start trigger after the last step
+	int				touchedStart;	// touching one during this step (G_TouchTriggers)
 	int				timerMs;
 	int				checkpoints;	// distinct checkpoints touched since the timer started
 	char			checkpointSeen[GS_MAX_CHECKPOINTS];

@@ -1,3 +1,7 @@
+# The engine patches are kept in a separate private repo (input replay is a
+# tool-assisted playback tool); clone it here, see docs/setup.md
+/engine/patches/
+
 # Game data stays on the local machine only (id Software / DeFRaG / map authors' content)
 *.pk3
 *.bsp

@@ -21,7 +21,7 @@ public servers.
 | `py/gauntlet/` | Python: ctypes binding for libgauntlet, `.run` files, scripted bots, the training environment |
 | `train/` | Training the AI: [ppo.py](train/ppo.py), one script, meant to be read top to bottom |
 | `tools/` | Command-line tools: export a run, replay it in oDFe, compare, render video, top-down map view |
-| `engine/` | oDFe as a submodule, our private patches, and the build script that applies them |
+| `engine/` | oDFe as a submodule and the build script (our engine patches are kept private, see [docs/setup.md](docs/setup.md)) |
 | `docs/setup.md` | Building, running and watching runs |
 | `viewer/`, `maps/custom/` | Not started: the stream viewer (M4), custom maps |
 

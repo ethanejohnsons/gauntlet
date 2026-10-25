@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build oDFe with gauntlet's patches, without touching the engine/oDFe submodule.
+# Build oDFe with gauntlet's patches (if present), without touching the engine/oDFe submodule.
 #
 # The submodule's committed tree is copied to build/odfe-src, engine/patches/*.patch
 # are applied there in order, and the result is built into build/odfe. The copy is
@@ -11,6 +11,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUB="$ROOT/engine/oDFe"
 SRC="$ROOT/build/odfe-src"
 OUT="$ROOT/build/odfe"
+
+# The patches (input replay for tools/render_run.sh and the overlay) live in a
+# separate private repo cloned to engine/patches. Without it this builds plain oDFe.
+if ! compgen -G "$ROOT/engine/patches/*.patch" > /dev/null; then
+	echo "note: no engine/patches/*.patch found; building plain oDFe (no gs_replay)"
+fi
 
 stamp="$(git -C "$SUB" rev-parse HEAD; cat "$ROOT"/engine/patches/*.patch 2>/dev/null | sha256sum)"
 if [[ ! -f "$SRC/.gauntlet-stamp" || "$(cat "$SRC/.gauntlet-stamp")" != "$stamp" ]]; then

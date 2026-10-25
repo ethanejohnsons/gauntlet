@@ -10,15 +10,29 @@ git submodule update --init
 engine/build.sh
 ```
 
-The script copies the submodule to `build/odfe-src`, applies `engine/patches/` (the private
-`gs_replay` input replay, see [engine/patches/README.md](../engine/patches/README.md)) and
-builds there, so the submodule stays clean. Output in `build/odfe/release-linux-x86_64/`:
+The script copies the submodule to `build/odfe-src`, applies the patches in `engine/patches/`
+if they're there, and builds the copy, so the submodule stays clean. Output in
+`build/odfe/release-linux-x86_64/`:
 
 | File | What |
 |---|---|
 | `oDFe.x64` | Client |
 | `oDFe.ded.x64` | Dedicated server |
 | `oDFe_opengl_x86_64.so`, `oDFe_vulkan_x86_64.so` | Renderers |
+
+### The private engine patches
+
+Replaying runs in the real game (`gs_replay`, used by `tools/render_run.sh` and the video
+overlay) needs two small oDFe patches. They're kept in a separate **private** repository,
+because input replay is a tool-assisted playback tool and could be used to fake record demos.
+If you have access, clone it into place before building:
+
+```sh
+git clone https://github.com/ethanejohnsons/gauntlet-patches.git engine/patches
+```
+
+Without it everything else still works: the sim, training, `tools/topdown.py`. `build.sh`
+then builds plain oDFe.
 
 ## Game data
 

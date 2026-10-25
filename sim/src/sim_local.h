@@ -1,7 +1,8 @@
 // sim_local.h -- everything the sim's own source files share.
 //
 // Files:
-//   env.c      the players: the public env API and gs_step_batch's thread pool
+//   env.c      the players: the public env API, and the thread pool for batches
+//   observe.c  what a player senses, for training (gs_observe_batch)
 //   world.c    the map: loading, entity parsing, and the world queries pmove uses
 //   route.c    the route: every open place's distance to the finish
 //   game.c     game logic from Q3's game module: spawn, think, triggers, items, timer
@@ -125,6 +126,9 @@ struct gs_env {
 	// each powerup item can be picked up again.
 	int				itemReady[GS_MAX_ITEMS];
 };
+
+// run fn( i, ctx ) for every i < n, spread over nthreads threads
+void	GS_ParallelFor( int n, int nthreads, void ( *fn )( int i, void *ctx ), void *ctx );
 
 // ---------------------------------------------------------------------------
 // game logic (game.c)

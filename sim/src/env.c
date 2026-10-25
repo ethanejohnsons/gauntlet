@@ -1,5 +1,5 @@
-// env.c -- the players: creating, stepping, placing and saving envs, and stepping
-// many of them at once on a worker pool (gs_step_batch).
+// env.c -- the players: creating, stepping, placing and saving envs, and the thread
+// pool that steps (gs_step_batch) or observes (gs_observe_batch) many at once.
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -73,29 +73,30 @@ void gs_env_restore( gs_env_t *env, const void *buf ) {
 }
 
 // ---------------------------------------------------------------------------
-// gs_step_batch: helper threads are started on first use and then wait for work.
-// Each batch is cut into chunks of GS_CHUNK envs; every thread, including the
-// caller, keeps taking the next chunk until none are left.
+// GS_ParallelFor: run fn( i, ctx ) for every i < n on a pool of threads. Helper
+// threads are started on first use and then wait for work. The range is cut into
+// chunks of GS_CHUNK; every thread, including the caller, keeps taking the next
+// chunk until none are left.
 
 #define GS_MAX_THREADS	256
 #define GS_CHUNK		16
 
 static struct {
 	pthread_mutex_t	lock;
-	pthread_cond_t	start;			// signalled when a new batch is ready
+	pthread_cond_t	start;			// signalled when a new job is ready
 	pthread_cond_t	done;			// signalled when the last helper finishes
 	pthread_t		threads[GS_MAX_THREADS];
 	int				numThreads;
-	int				batch;			// incremented for every batch
-	int				busy;			// helpers still working on the current batch
+	int				job;			// incremented for every job
+	int				busy;			// helpers still working on the current job
 
-	gs_env_t		**envs;
-	const gs_cmd_t	*cmds;
+	void			( *fn )( int i, void *ctx );
+	void			*ctx;
 	int				n;
-	atomic_int		next;			// first env of the next chunk
+	atomic_int		next;			// first index of the next chunk
 } pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER };
 
-static void StepChunks( void ) {
+static void RunChunks( void ) {
 	while ( 1 ) {
 		int i = atomic_fetch_add( &pool.next, GS_CHUNK );
 		if ( i >= pool.n ) {
@@ -103,22 +104,22 @@ static void StepChunks( void ) {
 		}
 		int end = i + GS_CHUNK < pool.n ? i + GS_CHUNK : pool.n;
 		for ( ; i < end; i++ ) {
-			gs_env_step( pool.envs[i], &pool.cmds[i] );
+			pool.fn( i, pool.ctx );
 		}
 	}
 }
 
 static void *Helper( void *arg ) {
-	int lastBatch = 0;
+	int lastJob = 0;
 	pthread_mutex_lock( &pool.lock );
 	while ( 1 ) {
-		while ( pool.batch == lastBatch ) {
+		while ( pool.job == lastJob ) {
 			pthread_cond_wait( &pool.start, &pool.lock );
 		}
-		lastBatch = pool.batch;
+		lastJob = pool.job;
 		pthread_mutex_unlock( &pool.lock );
 
-		StepChunks();
+		RunChunks();
 
 		pthread_mutex_lock( &pool.lock );
 		if ( --pool.busy == 0 ) {
@@ -128,10 +129,10 @@ static void *Helper( void *arg ) {
 	return NULL;
 }
 
-void gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads ) {
+void GS_ParallelFor( int n, int nthreads, void ( *fn )( int i, void *ctx ), void *ctx ) {
 	if ( nthreads <= 1 || n <= GS_CHUNK ) {
 		for ( int i = 0; i < n; i++ ) {
-			gs_env_step( envs[i], &cmds[i] );
+			fn( i, ctx );
 		}
 		return;
 	}
@@ -143,20 +144,35 @@ void gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads )
 	while ( pool.numThreads < nthreads - 1 ) {		// the caller is the last thread
 		pthread_create( &pool.threads[pool.numThreads++], NULL, Helper, NULL );
 	}
-	pool.envs = envs;
-	pool.cmds = cmds;
+	pool.fn = fn;
+	pool.ctx = ctx;
 	pool.n = n;
 	atomic_store( &pool.next, 0 );
 	pool.busy = pool.numThreads;
-	pool.batch++;
+	pool.job++;
 	pthread_cond_broadcast( &pool.start );
 	pthread_mutex_unlock( &pool.lock );
 
-	StepChunks();
+	RunChunks();
 
 	pthread_mutex_lock( &pool.lock );
 	while ( pool.busy > 0 ) {
 		pthread_cond_wait( &pool.done, &pool.lock );
 	}
 	pthread_mutex_unlock( &pool.lock );
+}
+
+typedef struct {
+	gs_env_t		**envs;
+	const gs_cmd_t	*cmds;
+} stepJob_t;
+
+static void StepOne( int i, void *ctx ) {
+	stepJob_t *job = ctx;
+	gs_env_step( job->envs[i], &job->cmds[i] );
+}
+
+void gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads ) {
+	stepJob_t job = { envs, cmds };
+	GS_ParallelFor( n, nthreads, StepOne, &job );
 }

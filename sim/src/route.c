@@ -1,17 +1,31 @@
-// route.c -- the route: how far every point of the map is from the finish.
+// route.c -- the route: how far every point of the map is from the start zone and
+// from the finish.
 //
 // gs_route_build covers the map with a grid of cubes ("cells"), marks the cells a
 // (crouching) player fits in, and then works out, for every open cell, the length of
-// the shortest path to the finish zone through open cells (Dijkstra's algorithm).
-// Teleporters count as a free jump from the trigger to the destination.
+// the shortest path through open cells to the start zone and to the finish zone
+// (Dijkstra's algorithm, once per target). Teleporters count as a free jump from the
+// trigger to the destination.
 //
-// Gravity is ignored: the route floats across gaps and up shafts. That's what we want
-// for a reward. It says which way is forward and how far is left, and leaves *how* to
-// get there (jumping, strafing) to the player.
+// A DeFRaG run has two legs: get to the start zone (which starts the timer), then to
+// the finish (which stops it). Hence two targets.
+//
+// Gravity is only roughly accounted for, with two costs:
+//  - climbing costs CLIMB_COST times as much as moving sideways or down, so the route
+//    goes around tall walls rather than over them, and happily drops down holes;
+//  - moving sideways through "air" (no floor within SUPPORT_HEIGHT below) costs
+//    AIR_COST times as much, so the route jumps gaps when it has to, but takes the
+//    long way around a gap nobody could jump.
+// That's what we want for a reward. It says which way is forward and how far is left,
+// and leaves *how* to get there (jumping, strafing) to the player.
 
 #include "sim_local.h"
 
 #define DEFAULT_CELL	16.0f
+#define UNREACHED		1e30f
+#define CLIMB_COST		8.0f	// each unit up counts as this many units of distance
+#define AIR_COST		12.0f	// each unit sideways with no floor below, likewise
+#define SUPPORT_HEIGHT	96.0f	// floor this close below a cell makes it "not air"
 
 // the box used to decide whether a player fits in a cell: crouched, so low passages count
 static const vec3_t	fitMins = { -15, -15, -24 };
@@ -22,26 +36,37 @@ static struct {
 	float	cell;
 	vec3_t	origin;			// world position of the corner of cell (0, 0, 0)
 	int		size[3];
-	float	*dist;			// per cell: distance to the finish, or -1 if blocked or unreachable
+	// per target, per cell: distance to the target zone, or -1 if blocked or unreachable
+	float	*dist[GS_ROUTE_TARGETS];
+	unsigned char *air;		// per cell: no floor within SUPPORT_HEIGHT below
 } route;
 
 static int CellIndex( int x, int y, int z ) {
 	return ( z * route.size[1] + y ) * route.size[0] + x;
 }
 
-static void CellCenter( int index, vec3_t out ) {
-	int x = index % route.size[0];
-	int y = ( index / route.size[0] ) % route.size[1];
-	int z = index / ( route.size[0] * route.size[1] );
-	out[0] = route.origin[0] + ( x + 0.5f ) * route.cell;
-	out[1] = route.origin[1] + ( y + 0.5f ) * route.cell;
-	out[2] = route.origin[2] + ( z + 0.5f ) * route.cell;
+static void CellCoords( int index, int c[3] ) {
+	c[0] = index % route.size[0];
+	c[1] = ( index / route.size[0] ) % route.size[1];
+	c[2] = index / ( route.size[0] * route.size[1] );
 }
 
-// The open cell nearest to pos, within `radius` cells of the one containing it, or -1.
-// Used where a point sits in or right next to a wall at grid resolution: a teleport
-// destination just above the floor, or a player brushing a wall.
-static int NearestOpenCell( const vec3_t pos, int radius ) {
+static int InGrid( int x, int y, int z ) {
+	return x >= 0 && y >= 0 && z >= 0 && x < route.size[0] && y < route.size[1] && z < route.size[2];
+}
+
+static void CellCenter( int index, vec3_t out ) {
+	int c[3];
+	CellCoords( index, c );
+	for ( int i = 0; i < 3; i++ ) {
+		out[i] = route.origin[i] + ( c[i] + 0.5f ) * route.cell;
+	}
+}
+
+// The open cell (dist >= 0) nearest to pos, within `radius` cells of the one containing
+// it, or -1. Used where a point sits in or right next to a wall at grid resolution: a
+// teleport destination just above the floor, or a player brushing a wall.
+static int NearestOpenCell( const float *dist, const vec3_t pos, int radius ) {
 	int c[3], best = -1;
 	float bestDist = 1e30f;
 	vec3_t center;
@@ -51,13 +76,10 @@ static int NearestOpenCell( const vec3_t pos, int radius ) {
 	for ( int z = c[2] - radius; z <= c[2] + radius; z++ ) {
 		for ( int y = c[1] - radius; y <= c[1] + radius; y++ ) {
 			for ( int x = c[0] - radius; x <= c[0] + radius; x++ ) {
-				if ( x < 0 || y < 0 || z < 0 || x >= route.size[0] || y >= route.size[1] || z >= route.size[2] ) {
+				if ( !InGrid( x, y, z ) || dist[ CellIndex( x, y, z ) ] < 0 ) {
 					continue;
 				}
 				int n = CellIndex( x, y, z );
-				if ( route.dist[n] < 0 ) {
-					continue;
-				}
 				CellCenter( n, center );
 				float d = Distance( pos, center );
 				if ( d < bestDist ) {
@@ -71,7 +93,7 @@ static int NearestOpenCell( const vec3_t pos, int radius ) {
 }
 
 // ---------------------------------------------------------------------------
-// which cells are open
+// the triggers that shape the route
 
 // Does the box at `center` touch any of the listed trigger entities?
 static int TouchesAny( const vec3_t center, const int *ents, int numEnts ) {
@@ -115,6 +137,39 @@ static const gsEnt_t *TeleportDest( const gsEnt_t *trigger ) {
 		}
 	}
 	return NULL;
+}
+
+typedef struct {
+	int		goals[GS_ROUTE_TARGETS][GS_MAX_ENTITIES];	// start-zone and finish triggers
+	int		numGoals[GS_ROUTE_TARGETS];
+	int		deadly[GS_MAX_ENTITIES];
+	int		numDeadly;
+	int		teleports[GS_MAX_ENTITIES];
+	int		teleportDestCell[GS_MAX_ENTITIES];		// the open cell each teleport lands in
+	int		numTeleports;
+	unsigned char *isTeleportDest;					// per cell: some teleport lands here
+} triggers_t;
+
+static void FindTriggers( triggers_t *t ) {
+	memset( t, 0, sizeof( *t ) );
+	for ( int i = 0; i < gs_world.numEnts; i++ ) {
+		const gsEnt_t *e = &gs_world.ents[i];
+		if ( !e->model || !( e->contents & CONTENTS_TRIGGER ) ) {
+			continue;
+		}
+		if ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_START_TIMER ) ) {
+			t->goals[GS_ROUTE_START][ t->numGoals[GS_ROUTE_START]++ ] = i;
+		}
+		if ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_STOP_TIMER ) ) {
+			t->goals[GS_ROUTE_FINISH][ t->numGoals[GS_ROUTE_FINISH]++ ] = i;
+		}
+		if ( e->type == GE_TRIGGER_HURT || ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_KILL ) ) ) {
+			t->deadly[ t->numDeadly++ ] = i;
+		}
+		if ( TeleportDest( e ) ) {
+			t->teleports[ t->numTeleports++ ] = i;
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -166,13 +221,95 @@ static heapItem_t HeapPop( void ) {
 	return top;
 }
 
+static void Relax( float *dist, int cell, float d ) {
+	if ( dist[cell] >= 0 && d < dist[cell] ) {
+		dist[cell] = d;
+		HeapPush( d, cell );
+	}
+}
+
+// Fill dist (open cells UNREACHED, blocked -1) with each open cell's distance to the
+// goal triggers. Cells that can't reach them end up -1.
+static void Flood( float *dist, const triggers_t *t, const int *goals, int numGoals ) {
+	int numCells = route.size[0] * route.size[1] * route.size[2];
+	vec3_t center;
+
+	heap.count = 0;
+	for ( int c = 0; c < numCells; c++ ) {
+		if ( dist[c] >= 0 ) {
+			CellCenter( c, center );
+			if ( TouchesAny( center, goals, numGoals ) ) {
+				dist[c] = 0;
+				HeapPush( 0, c );
+			}
+		}
+	}
+
+	while ( heap.count ) {
+		heapItem_t it = HeapPop();
+		if ( it.dist > dist[ it.cell ] ) {
+			continue;	// stale entry
+		}
+		int c[3];
+		CellCoords( it.cell, c );
+
+		// The 26 neighbours. We search backwards from the goal, so the player moves
+		// from the neighbour to this cell: it climbs when dz < 0, and the sideways part
+		// of the step is through air if the neighbour has no floor below.
+		for ( int dz = -1; dz <= 1; dz++ ) {
+			float up = dz < 0 ? CLIMB_COST : 1;
+			for ( int dy = -1; dy <= 1; dy++ ) {
+				for ( int dx = -1; dx <= 1; dx++ ) {
+					if ( !( dx || dy || dz ) || !InGrid( c[0] + dx, c[1] + dy, c[2] + dz ) ) {
+						continue;
+					}
+					int n = CellIndex( c[0] + dx, c[1] + dy, c[2] + dz );
+					float side = sqrtf( (float)( dx * dx + dy * dy ) ) * ( route.air[n] ? AIR_COST : 1 );
+					float step = sqrtf( side * side + ( dz * up ) * ( dz * up ) );
+					Relax( dist, n, it.dist + route.cell * step );
+				}
+			}
+		}
+
+		// Reaching a teleport's destination also reaches every cell of its trigger,
+		// at the same distance: stepping in is a free jump to here.
+		for ( int k = 0; t->isTeleportDest[ it.cell ] && k < t->numTeleports; k++ ) {
+			if ( t->teleportDestCell[k] != it.cell ) {
+				continue;
+			}
+			const gsEnt_t *trig = &gs_world.ents[ t->teleports[k] ];
+			int lo[3], hi[3];
+			for ( int i = 0; i < 3; i++ ) {
+				lo[i] = (int)floorf( ( trig->absmin[i] - fitMaxs[i] - route.origin[i] ) / route.cell );
+				hi[i] = (int)floorf( ( trig->absmax[i] - fitMins[i] - route.origin[i] ) / route.cell );
+			}
+			for ( int z = lo[2]; z <= hi[2]; z++ ) {
+				for ( int y = lo[1]; y <= hi[1]; y++ ) {
+					for ( int x = lo[0]; x <= hi[0]; x++ ) {
+						if ( InGrid( x, y, z ) ) {
+							int n = CellIndex( x, y, z );
+							CellCenter( n, center );
+							if ( TouchesAny( center, &t->teleports[k], 1 ) ) {
+								Relax( dist, n, it.dist );
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for ( int c = 0; c < numCells; c++ ) {
+		if ( dist[c] == UNREACHED ) {
+			dist[c] = -1;
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 
 int gs_route_build( float cell ) {
-	int finish[GS_MAX_ENTITIES], numFinish = 0;
-	int deadly[GS_MAX_ENTITIES], numDeadly = 0;
-	int teleports[GS_MAX_ENTITIES], numTeleports = 0;
-	int teleportDestCell[GS_MAX_ENTITIES];
+	static triggers_t t;
 	vec3_t mins, maxs, center;
 
 	route.built = 0;
@@ -180,25 +317,10 @@ int gs_route_build( float cell ) {
 		GS_SetError( "gs_route_build: no map loaded" );
 		return -1;
 	}
-
-	// the triggers that matter: finish, death, teleport
-	for ( int i = 0; i < gs_world.numEnts; i++ ) {
-		const gsEnt_t *e = &gs_world.ents[i];
-		if ( !e->model || !( e->contents & CONTENTS_TRIGGER ) ) {
-			continue;
-		}
-		if ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_STOP_TIMER ) ) {
-			finish[numFinish++] = i;
-		}
-		if ( e->type == GE_TRIGGER_HURT || ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_KILL ) ) ) {
-			deadly[numDeadly++] = i;
-		}
-		if ( TeleportDest( e ) ) {
-			teleports[numTeleports++] = i;
-		}
-	}
-	if ( !numFinish ) {
-		GS_SetError( "gs_route_build: %s has no finish (no trigger fires a target_stopTimer)", gs_world.mapname );
+	FindTriggers( &t );
+	if ( !t.numGoals[GS_ROUTE_START] || !t.numGoals[GS_ROUTE_FINISH] ) {
+		GS_SetError( "gs_route_build: %s needs triggers that fire a target_startTimer and a target_stopTimer",
+					 gs_world.mapname );
 		return -1;
 	}
 
@@ -210,117 +332,62 @@ int gs_route_build( float cell ) {
 		route.size[i] = (int)ceilf( ( maxs[i] - mins[i] ) / route.cell ) + 1;
 	}
 	int numCells = route.size[0] * route.size[1] * route.size[2];
-	free( route.dist );
-	route.dist = malloc( numCells * sizeof( float ) );
+	for ( int k = 0; k < GS_ROUTE_TARGETS; k++ ) {
+		free( route.dist[k] );
+		route.dist[k] = malloc( numCells * sizeof( float ) );
+	}
+	free( route.air );
+	route.air = calloc( numCells, 1 );
 
-	// open cells start at "infinity", blocked ones at -1
-	unsigned char *isFinish = calloc( numCells, 1 );
-	unsigned char *isTeleDest = calloc( numCells, 1 );
+	// open cells (the player fits, no lava, no kill zone) start UNREACHED, blocked ones -1
+	float *open = route.dist[0];
 	for ( int c = 0; c < numCells; c++ ) {
 		trace_t tr;
 		CellCenter( c, center );
 		GS_Trace( &tr, center, fitMins, fitMaxs, center, GS_PLAYER_NUM, MASK_PLAYERSOLID );
-		int open = !tr.startsolid
+		int isOpen = !tr.startsolid
 			&& !( GS_PointContents( center, GS_PLAYER_NUM ) & ( CONTENTS_LAVA | CONTENTS_SLIME ) )
-			&& !TouchesAny( center, deadly, numDeadly );
-		route.dist[c] = open ? 1e30f : -1;
-		isFinish[c] = open && TouchesAny( center, finish, numFinish );
+			&& !TouchesAny( center, t.deadly, t.numDeadly );
+		open[c] = isOpen ? UNREACHED : -1;
+		if ( isOpen ) {
+			vec3_t below;
+			VectorCopy( center, below );
+			below[2] -= SUPPORT_HEIGHT;
+			GS_Trace( &tr, center, NULL, NULL, below, GS_PLAYER_NUM, MASK_PLAYERSOLID );
+			route.air[c] = tr.fraction == 1.0f;
+		}
 	}
 
-	// teleport destinations: the open cell the player lands in
-	for ( int t = 0; t < numTeleports; t++ ) {
-		const gsEnt_t *dest = TeleportDest( &gs_world.ents[ teleports[t] ] );
+	// the open cell each teleport lands in (TeleportPlayer lifts the player by one unit)
+	t.isTeleportDest = calloc( numCells, 1 );
+	for ( int k = 0; k < t.numTeleports; k++ ) {
 		vec3_t landing;
-		VectorCopy( dest->origin, landing );
-		landing[2] += 1;	// TeleportPlayer lifts the player by one unit
-		teleportDestCell[t] = NearestOpenCell( landing, 3 );
-		if ( teleportDestCell[t] >= 0 ) {
-			isTeleDest[ teleportDestCell[t] ] = 1;
+		VectorCopy( TeleportDest( &gs_world.ents[ t.teleports[k] ] )->origin, landing );
+		landing[2] += 1;
+		t.teleportDestCell[k] = NearestOpenCell( open, landing, 3 );
+		if ( t.teleportDestCell[k] >= 0 ) {
+			t.isTeleportDest[ t.teleportDestCell[k] ] = 1;
 		}
 	}
 
-	// Dijkstra from every finish cell outwards
-	heap.count = 0;
+	for ( int k = GS_ROUTE_TARGETS - 1; k >= 0; k-- ) {
+		if ( k ) {
+			memcpy( route.dist[k], open, numCells * sizeof( float ) );
+		}
+		Flood( route.dist[k], &t, t.goals[k], t.numGoals[k] );
+	}
+
+	free( t.isTeleportDest );
+
+	int numReached[GS_ROUTE_TARGETS] = { 0 };
 	for ( int c = 0; c < numCells; c++ ) {
-		if ( isFinish[c] ) {
-			route.dist[c] = 0;
-			HeapPush( 0, c );
+		for ( int k = 0; k < GS_ROUTE_TARGETS; k++ ) {
+			numReached[k] += route.dist[k][c] >= 0;
 		}
 	}
-	while ( heap.count ) {
-		heapItem_t it = HeapPop();
-		if ( it.dist > route.dist[ it.cell ] ) {
-			continue;	// stale entry
-		}
-		int x = it.cell % route.size[0];
-		int y = ( it.cell / route.size[0] ) % route.size[1];
-		int z = it.cell / ( route.size[0] * route.size[1] );
-
-		// the 26 neighbours, one cell, sqrt(2) or sqrt(3) cells away
-		for ( int dz = -1; dz <= 1; dz++ ) {
-			for ( int dy = -1; dy <= 1; dy++ ) {
-				for ( int dx = -1; dx <= 1; dx++ ) {
-					int nx = x + dx, ny = y + dy, nz = z + dz;
-					if ( ( !dx && !dy && !dz ) || nx < 0 || ny < 0 || nz < 0
-						|| nx >= route.size[0] || ny >= route.size[1] || nz >= route.size[2] ) {
-						continue;
-					}
-					int n = CellIndex( nx, ny, nz );
-					float d = it.dist + route.cell * sqrtf( (float)( dx * dx + dy * dy + dz * dz ) );
-					if ( route.dist[n] >= 0 && d < route.dist[n] ) {
-						route.dist[n] = d;
-						HeapPush( d, n );
-					}
-				}
-			}
-		}
-
-		// Reaching a teleport destination also reaches every cell of the teleport's
-		// trigger, at the same distance: stepping in is a free jump to here.
-		if ( isTeleDest[ it.cell ] ) {
-			for ( int t = 0; t < numTeleports; t++ ) {
-				if ( teleportDestCell[t] != it.cell ) {
-					continue;
-				}
-				const gsEnt_t *trig = &gs_world.ents[ teleports[t] ];
-				int lo[3], hi[3];
-				for ( int i = 0; i < 3; i++ ) {
-					lo[i] = (int)floorf( ( trig->absmin[i] - fitMaxs[i] - route.origin[i] ) / route.cell );
-					hi[i] = (int)floorf( ( trig->absmax[i] - fitMins[i] - route.origin[i] ) / route.cell );
-					lo[i] = lo[i] < 0 ? 0 : lo[i];
-					hi[i] = hi[i] >= route.size[i] ? route.size[i] - 1 : hi[i];
-				}
-				for ( int cz = lo[2]; cz <= hi[2]; cz++ ) {
-					for ( int cy = lo[1]; cy <= hi[1]; cy++ ) {
-						for ( int cx = lo[0]; cx <= hi[0]; cx++ ) {
-							int n = CellIndex( cx, cy, cz );
-							CellCenter( n, center );
-							if ( route.dist[n] >= 0 && it.dist < route.dist[n] && TouchesAny( center, &teleports[t], 1 ) ) {
-								route.dist[n] = it.dist;
-								HeapPush( it.dist, n );
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// open cells the finish can't be reached from
-	int numOpen = 0, numReached = 0, numFinishCells = 0;
-	for ( int c = 0; c < numCells; c++ ) {
-		numOpen += route.dist[c] >= 0;
-		numFinishCells += isFinish[c];
-		if ( route.dist[c] > 1e29f ) {
-			route.dist[c] = -1;
-		}
-		numReached += route.dist[c] >= 0;
-	}
-	Com_Printf( "route: %ix%ix%i cells of %.0f units, %i open, %i in the finish, %i reach it "
-				"(%i finish / %i deadly / %i teleport triggers)\n", route.size[0], route.size[1], route.size[2],
-				route.cell, numOpen, numFinishCells, numReached, numFinish, numDeadly, numTeleports );
-	free( isFinish );
-	free( isTeleDest );
+	Com_Printf( "route: %ix%ix%i cells of %.0f units; %i reach the start zone, %i the finish "
+				"(%i deadly / %i teleport triggers)\n", route.size[0], route.size[1], route.size[2],
+				route.cell, numReached[GS_ROUTE_START], numReached[GS_ROUTE_FINISH], t.numDeadly, t.numTeleports );
 	route.built = 1;
 	return 0;
 }
@@ -328,10 +395,12 @@ int gs_route_build( float cell ) {
 // ---------------------------------------------------------------------------
 // lookups
 
-float gs_route_distance( const float pos[3] ) {
-	if ( !route.built ) {
+float gs_route_distance( int target, const float pos[3] ) {
+	if ( !route.built || target < 0 || target >= GS_ROUTE_TARGETS ) {
 		return -1;
 	}
+	const float *dist = route.dist[target];
+
 	// Blend the 8 cell centers around pos (trilinear), skipping blocked ones, so the
 	// distance changes smoothly as the player moves.
 	vec3_t f;
@@ -343,16 +412,15 @@ float gs_route_distance( const float pos[3] ) {
 	}
 	float sum = 0, weight = 0;
 	for ( int corner = 0; corner < 8; corner++ ) {
-		int c[3] = { c0[0] + ( corner & 1 ), c0[1] + ( ( corner >> 1 ) & 1 ), c0[2] + ( corner >> 2 ) };
-		if ( c[0] < 0 || c[1] < 0 || c[2] < 0 || c[0] >= route.size[0] || c[1] >= route.size[1] || c[2] >= route.size[2] ) {
+		int dx = corner & 1, dy = ( corner >> 1 ) & 1, dz = corner >> 2;
+		if ( !InGrid( c0[0] + dx, c0[1] + dy, c0[2] + dz ) ) {
 			continue;
 		}
-		float d = route.dist[ CellIndex( c[0], c[1], c[2] ) ];
+		float d = dist[ CellIndex( c0[0] + dx, c0[1] + dy, c0[2] + dz ) ];
 		if ( d < 0 ) {
 			continue;
 		}
-		float w = ( corner & 1 ? f[0] : 1 - f[0] ) * ( ( corner >> 1 ) & 1 ? f[1] : 1 - f[1] )
-				* ( corner >> 2 ? f[2] : 1 - f[2] );
+		float w = ( dx ? f[0] : 1 - f[0] ) * ( dy ? f[1] : 1 - f[1] ) * ( dz ? f[2] : 1 - f[2] );
 		sum += w * d;
 		weight += w;
 	}
@@ -361,41 +429,40 @@ float gs_route_distance( const float pos[3] ) {
 	}
 
 	// pos is in or right next to a wall at grid resolution: use the nearest open cell
-	int near = NearestOpenCell( pos, 1 );
+	int near = NearestOpenCell( dist, pos, 2 );
 	if ( near < 0 ) {
 		return -1;
 	}
 	vec3_t center;
 	CellCenter( near, center );
-	return route.dist[near] + Distance( pos, center );
+	return dist[near] + Distance( pos, center );
 }
 
-int gs_route_ahead( const float pos[3], float ahead, float out[3] ) {
-	// start from the open cell nearest to pos, then walk downhill cell by cell
-	if ( !route.built ) {
+int gs_route_ahead( int target, const float pos[3], float ahead, float out[3] ) {
+	if ( !route.built || target < 0 || target >= GS_ROUTE_TARGETS ) {
 		return -1;
 	}
-	int cell = NearestOpenCell( pos, 1 );
+	const float *dist = route.dist[target];
+
+	// start from the open cell nearest to pos, then walk downhill cell by cell
+	int cell = NearestOpenCell( dist, pos, 2 );
 	if ( cell < 0 ) {
 		return -1;
 	}
-
 	float walked = 0;
-	while ( walked < ahead && route.dist[cell] > 0 ) {
-		int x = cell % route.size[0], y = ( cell / route.size[0] ) % route.size[1];
-		int z = cell / ( route.size[0] * route.size[1] );
-		int next = -1;
-		float nextDist = route.dist[cell];
+	while ( walked < ahead && dist[cell] > 0 ) {
+		int c[3], next = -1;
+		float nextDist = dist[cell];
+		CellCoords( cell, c );
 		for ( int dz = -1; dz <= 1; dz++ ) {
 			for ( int dy = -1; dy <= 1; dy++ ) {
 				for ( int dx = -1; dx <= 1; dx++ ) {
-					int nx = x + dx, ny = y + dy, nz = z + dz;
-					if ( nx < 0 || ny < 0 || nz < 0 || nx >= route.size[0] || ny >= route.size[1] || nz >= route.size[2] ) {
+					if ( !InGrid( c[0] + dx, c[1] + dy, c[2] + dz ) ) {
 						continue;
 					}
-					int n = CellIndex( nx, ny, nz );
-					if ( route.dist[n] >= 0 && route.dist[n] < nextDist ) {
-						nextDist = route.dist[n];
+					int n = CellIndex( c[0] + dx, c[1] + dy, c[2] + dz );
+					if ( dist[n] >= 0 && dist[n] < nextDist ) {
+						nextDist = dist[n];
 						next = n;
 					}
 				}
@@ -404,7 +471,7 @@ int gs_route_ahead( const float pos[3], float ahead, float out[3] ) {
 		if ( next < 0 ) {
 			break;	// a teleport trigger: the route continues at the destination
 		}
-		walked += route.dist[cell] - nextDist;
+		walked += dist[cell] - nextDist;
 		cell = next;
 	}
 	CellCenter( cell, out );

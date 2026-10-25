@@ -18,11 +18,12 @@ public servers.
 | `sim/q3/` | Vendored Quake III source, changed as little as possible ([PATCHES.md](sim/q3/PATCHES.md)) |
 | `sim/src/` | Our code around it: map loading, game logic, the public API |
 | `sim/tests/` | C tests and a benchmark (`ctest`) |
-| `py/gauntlet/` | Python: ctypes binding for libgauntlet, `.run` files, scripted bots |
+| `py/gauntlet/` | Python: ctypes binding for libgauntlet, `.run` files, scripted bots, the training environment |
+| `train/` | Training the AI: [ppo.py](train/ppo.py), one script, meant to be read top to bottom |
 | `tools/` | Command-line tools: export a run, replay it in oDFe, compare, render video, top-down map view |
 | `engine/` | oDFe as a submodule, our private patches, and the build script that applies them |
 | `docs/setup.md` | Building, running and watching runs |
-| `train/`, `viewer/`, `maps/custom/` | Not started: training (M3), the stream viewer (M4), custom maps |
+| `viewer/`, `maps/custom/` | Not started: the stream viewer (M4), custom maps |
 
 ## Reading the code
 
@@ -34,6 +35,7 @@ A good order:
 4. [sim/src/world.c](sim/src/world.c): loading a map and its entities, and the world queries.
 5. [sim/src/env.c](sim/src/env.c): the player API and the thread pool.
 6. [py/gauntlet/](py/gauntlet/) and [tools/](tools/): driving the sim from Python and replaying in the real game.
+7. [py/gauntlet/env.py](py/gauntlet/env.py) then [train/ppo.py](train/ppo.py): how the AI sees, acts, is rewarded and learns.
 
 The vendored code in `sim/q3/` is id's and oDFe's, kept as close to the original as
 possible; you don't need to read it to follow ours. The one movement file worth a

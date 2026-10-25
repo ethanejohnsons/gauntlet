@@ -6,7 +6,8 @@ With --route, the floor is coloured by distance to the finish instead (yellow = 
 purple = near, grey = not connected), from the sim's route.
 Zones from the entity list are outlined: start timer (green), stop timer (red),
 checkpoints (yellow), teleporters (purple), jump pads (cyan), kill zones (dark red).
-The run is the scripted strafe jumper (py/gauntlet/bots.py), coloured by speed.
+The run is the scripted strafe jumper (py/gauntlet/bots.py), or a saved .run file
+with --run, coloured by speed.
 
     python3 tools/topdown.py vanilla_01 -o vanilla_01.png
 """
@@ -19,7 +20,7 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "py"))
 
-from gauntlet import bots, sim  # noqa: E402
+from gauntlet import bots, runfile, sim  # noqa: E402
 
 
 def floor_heights(info, cell):
@@ -66,6 +67,17 @@ def bot_run(frames):
         path.append((s.origin[0], s.origin[1], bots.hspeed(s)))
         if s.dead:
             break
+    return path
+
+
+def file_run(run):
+    """A saved run, replayed in the sim; returns (x, y, speed) per frame."""
+    env = sim.Env()
+    env.spawn()
+    path = []
+    for cmd in run.cmds():
+        s = env.step(cmd)
+        path.append((s.origin[0], s.origin[1], bots.hspeed(s)))
     return path
 
 
@@ -120,6 +132,7 @@ def main():
     ap.add_argument("--cell", type=float, default=8, help="units per pixel (default 8)")
     ap.add_argument("--frames", type=int, default=400, help="frames of the bot run")
     ap.add_argument("--route", action="store_true", help="colour the floor by distance to the finish")
+    ap.add_argument("--run", help="draw this .run file instead of the scripted bot")
     args = ap.parse_args()
 
     try:
@@ -158,7 +171,7 @@ def main():
         x1, y0 = px(amax[0], amax[1])
         d.rectangle([x0, y0, x1, y1], outline=color, width=2)
 
-    path = bot_run(args.frames)
+    path = file_run(runfile.read(args.run)) if args.run else bot_run(args.frames)
     vmax = max(p[2] for p in path)
     for a, b in zip(path, path[1:]):
         d.line([px(a[0], a[1]), px(b[0], b[1])], fill=speed_color(b[2], vmax), width=3)

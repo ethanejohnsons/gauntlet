@@ -74,7 +74,7 @@ Needs `cmake`, `ninja` and `zlib`. Build from the repo root:
 ```sh
 cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cmake
-ctest --test-dir build/cmake      # map load, strafe jump, thread determinism, items/jump pads
+ctest --test-dir build/cmake      # map load, strafe, threads, items, route, observations
 build/cmake/sim/bench             # steps per second across thread counts
 ```
 
@@ -126,3 +126,41 @@ python3 tools/topdown.py vanilla_02 --route -o build/topdown/vanilla_02_route.pn
 ```
 
 `build/cmake/sim/test_route <map> v` prints the grid statistics for a map.
+
+## Training the AI
+
+Training uses PyTorch in a virtualenv inside the repo (`.venv/`, git-ignored, about 5 GB
+with CUDA). To set it up (pip's temporary files go to `build/` because `/tmp` may be small):
+
+```sh
+python3 -m venv .venv
+mkdir -p build/pip-tmp && TMPDIR=$PWD/build/pip-tmp .venv/bin/pip install torch numpy pillow tensorboard
+```
+
+Train on a map, here for 30 minutes:
+
+```sh
+.venv/bin/python -u train/ppo.py vanilla_01 --minutes 30
+```
+
+Everything goes to `runs/<map>/<date-time>/` (git-ignored): TensorBoard logs, the network
+(`agent.pt`) and the best runs so far, `best_progress.run` and `best_time.run`. To follow
+training in a browser:
+
+```sh
+.venv/bin/tensorboard --logdir runs/
+```
+
+To record what the network was "thinking" during a run (inputs, hidden layers, choice
+probabilities and value, per decision; the data the stream overlay will draw):
+
+```sh
+.venv/bin/python tools/think.py runs/<map>/<name>/best_progress.run runs/<map>/<name>/agent.pt
+```
+
+To look at a saved run, draw it on the map or render it in the real game:
+
+```sh
+python3 tools/topdown.py vanilla_01 --route --run runs/vanilla_01/<name>/best_progress.run -o build/topdown/ai.png
+tools/render_run.sh runs/vanilla_01/<name>/best_progress.run
+```

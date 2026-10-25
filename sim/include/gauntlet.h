@@ -100,20 +100,25 @@ float		gs_trace( const float start[3], const float end[3], const float mins[3],
 					  const float maxs[3], float endpos[3] );
 void		gs_set_verbose( int level );		// 1: print Q3's messages, 2: also debug ones
 
-// --- the route: distance to the finish -------------------------------------
+// --- the route: distance to the start zone and to the finish -----------------
 //
 // A grid over the map holding, for every place a player fits, the length of the
-// shortest path to the finish zone through open space. Gravity is ignored (the path
-// floats over gaps) and teleporters count as free jumps. Used for rewards ("how much
-// closer did I get?") and to show the way ahead.
+// shortest path through open space to a target: the start zone (which starts the
+// timer) or the finish. Gravity is ignored (the path floats over gaps) and
+// teleporters count as free jumps. Used for rewards ("how much closer did I get?")
+// and to show the way ahead.
 
-// Build it for the loaded map; `cell` is the grid spacing in units (<= 0: 16).
-// Takes a few seconds. Returns 0, or -1 if the map has no finish (see gs_last_error).
+#define GS_ROUTE_START		0
+#define GS_ROUTE_FINISH		1
+#define GS_ROUTE_TARGETS	2
+
+// Build it for the loaded map; `cell` is the grid spacing in units (<= 0: 16). Takes
+// a few seconds. Returns 0, or -1 if the map has no start or finish (see gs_last_error).
 int			gs_route_build( float cell );
-// Distance from pos to the finish along the route, or -1 if pos isn't connected to it.
-float		gs_route_distance( const float pos[3] );
-// The point about `ahead` units further along the route from pos. Returns 0, or -1.
-int			gs_route_ahead( const float pos[3], float ahead, float out[3] );
+// Distance from pos to the target (GS_ROUTE_*), or -1 if pos isn't connected to it.
+float		gs_route_distance( int target, const float pos[3] );
+// The point about `ahead` units further along the route to the target. Returns 0, or -1.
+int			gs_route_ahead( int target, const float pos[3], float ahead, float out[3] );
 
 // --- players ---------------------------------------------------------------
 
@@ -135,6 +140,35 @@ void		gs_env_restore( gs_env_t *env, const void *buf );
 // caller is one of them; <= 1 steps them all on the calling thread). Results are
 // identical whatever the thread count.
 void		gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads );
+
+// --- observations, for training --------------------------------------------
+//
+// What a player senses, as GS_OBS_SIZE floats, roughly in [-1, 1]. Directions are
+// relative to where the player looks (yaw only): x forward, y left, z up.
+//
+//   0-2    velocity (x, y, z) / 800
+//   3      horizontal speed / 800
+//   4      on the ground (0 or 1)
+//   5      jump held: jump must be released before the next jump (0 or 1)
+//   6      haste active (0 or 1)
+//   7-22   16 level feelers, every 22.5 degrees starting straight ahead, turning left:
+//          how far a ray from the player's origin gets before hitting something,
+//          as a fraction of GS_OBS_RAY_LENGTH
+//   23-30  8 feelers angled 45 degrees down, every 45 degrees (find edges and pits)
+//   31     feeler straight down,  32  straight up
+//   33-44  the route ahead: points 64, 128, 256 and 512 units further along the route,
+//          relative to the player (x, y, z) / 512; zeros if there is no route here.
+//          The route leads to the start zone until the timer runs, then to the finish.
+//   45     timer running (0 or 1)
+#define GS_OBS_SIZE			46
+#define GS_OBS_RAY_LENGTH	1024
+
+// Fill obs[i * GS_OBS_SIZE ...] for envs[i], and optionally states[i] (as
+// gs_env_get_state) and route_dist[i] (gs_route_distance from the player's origin to
+// the current target: the start zone until the timer runs, then the finish).
+// states and route_dist may be NULL.
+void		gs_observe_batch( gs_env_t **envs, int n, int nthreads, float *obs,
+							  gs_state_t *states, float *route_dist );
 
 #ifdef __cplusplus
 }

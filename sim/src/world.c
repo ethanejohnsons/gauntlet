@@ -130,6 +130,7 @@ static int ParseEntity( const char **p, gsEnt_t *ent, float *random ) {
 	}
 
 	memset( ent, 0, sizeof( *ent ) );
+	ent->wait = -999;	// "no wait key": SetupEntity fills in the class default
 	*random = 0;
 	while ( 1 ) {
 		char key[MAX_TOKEN_CHARS];
@@ -165,6 +166,8 @@ static int ParseEntity( const char **p, gsEnt_t *ent, float *random ) {
 			ent->wait = atof( tok );
 		} else if ( !Q_stricmp( key, "speed" ) ) {
 			ent->speed = atof( tok );
+		} else if ( !Q_stricmp( key, "dmg" ) ) {
+			ent->dmg = atoi( tok );
 		} else if ( !Q_stricmp( key, "count" ) ) {
 			ent->count = atoi( tok );
 		} else if ( !Q_stricmp( key, "random" ) ) {
@@ -177,6 +180,18 @@ static int ParseEntity( const char **p, gsEnt_t *ent, float *random ) {
 // brush models (SV_SetBrushModel + SV_LinkEntity).
 static void SetupEntity( gsEnt_t *ent, float random ) {
 	ent->type = ClassType( ent->classname );
+	ent->timedSlot = -1;
+	if ( ent->wait == -999 ) {
+		ent->wait = ent->type == GE_TRIGGER_MULTIPLE ? 0.5f : 0;	// SP_trigger_multiple's default
+	}
+	if ( ent->type == GE_TRIGGER_HURT ) {
+		if ( !ent->dmg ) {
+			ent->dmg = 5;						// SP_trigger_hurt's default
+		}
+		if ( ent->spawnflags & 1 ) {
+			ent->type = GE_UNSUPPORTED;			// START_OFF: switched on by a target, not simulated
+		}
+	}
 
 	if ( ent->type == GE_ITEM ) {
 		// a random respawn time can't be reproduced, so such maps aren't trusted
@@ -226,6 +241,7 @@ static int ParseEntities( void ) {
 	gs_world.numUnsupported = 0;
 	gs_world.numItems = 0;
 	gs_world.numCheckpoints = 0;
+	gs_world.numTimedTriggers = 0;
 
 	while ( 1 ) {
 		gsEnt_t ent;
@@ -259,6 +275,30 @@ static int ParseEntities( void ) {
 			if ( !Q_stricmp( gs_world.ents[j].targetname, ent->target ) ) {
 				ent->targets[ ent->numTargets++ ] = j;
 			}
+		}
+	}
+
+	// Triggers with a re-fire delay, tracked per player:
+	//  - triggers that give items obey their "wait" (multi_trigger in g_trigger.c):
+	//    after firing, wait seconds before firing again, never again if wait <= 0.
+	//    Without it a give repeats every frame the player stands in the trigger.
+	//    Timer and checkpoint triggers keep firing every frame, which matches
+	//    DeFRaG's timing;
+	//  - trigger_hurt hurts at most every 100 ms (hurt_touch).
+	for ( int i = 0; i < gs_world.numEnts; i++ ) {
+		gsEnt_t *ent = &gs_world.ents[i];
+		int timed = ent->type == GE_TRIGGER_HURT;
+		for ( int k = 0; ent->type == GE_TRIGGER_MULTIPLE && k < ent->numTargets; k++ ) {
+			timed |= gs_world.ents[ ent->targets[k] ].type == GE_TARGET_GIVE;
+		}
+		if ( !timed ) {
+			continue;
+		}
+		if ( gs_world.numTimedTriggers == GS_MAX_TIMED_TRIGGERS ) {
+			ent->type = GE_UNSUPPORTED;
+			gs_world.numUnsupported++;
+		} else {
+			ent->timedSlot = gs_world.numTimedTriggers++;
 		}
 	}
 	return 0;

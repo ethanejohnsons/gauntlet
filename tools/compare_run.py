@@ -5,10 +5,10 @@ Replays the .run in the sim and checks position, velocity and health on every fr
 the engine logged (one per server snapshot), skipping the run's settle frames. Exits
 0 if every frame matches, 1 otherwise.
 
-Health is compared as change since the first compared frame. Its starting value
-differs: health over 100 ticks down once a second, and the engine player has been
-standing at the spawn for longer than the sim's. A one-point wobble is allowed,
-since those ticks land on different frames.
+Health is compared from the first frame where both sides are at 100 or below, as
+change since then. Its starting value differs: health over 100 ticks down once a
+second until it reaches 100, and the engine player has been standing at the spawn
+for longer than the sim's, so the two reach 100 at different times.
 
     python3 tools/compare_run.py ~/.q3a/defrag/runs/vanilla_01_strafe.run ~/.q3a/defrag/gs_replay.log
 """
@@ -56,8 +56,8 @@ def sim_states(run):
 
 def difference(a, b, health_offset):
     """Largest per-axis difference in position or velocity between two states; health
-    changing differently (beyond the one-point tick wobble) counts as infinite."""
-    if a[3] is not None and health_offset is not None and abs((a[3] - b[3]) - health_offset) > 1:
+    changing differently counts as infinite."""
+    if health_offset is not None and (a[3] - b[3]) != health_offset:
         return float("inf")
     return max(abs(x - y) for x, y in zip(a[0] + a[1], b[0] + b[1]))
 
@@ -76,8 +76,11 @@ def main():
     ours = sim_states(run)
 
     frames = [f for f in sorted(engine) if run.settle <= f < len(ours)]
-    offset = engine[frames[0]][3] - ours[frames[0]][3] if frames and engine[frames[0]][3] is not None else None
-    diffs = {f: difference(engine[f], ours[f], offset) for f in frames}
+    diffs, offset = {}, None
+    for f in frames:
+        if offset is None and engine[f][3] is not None and engine[f][3] <= 100 and ours[f][3] <= 100:
+            offset = engine[f][3] - ours[f][3]
+        diffs[f] = difference(engine[f], ours[f], offset)
     exact = sum(d == 0 for d in diffs.values())
     worst = max(frames, key=diffs.get) if frames else None
     bad = [f for f in frames if diffs[f] > args.tol]

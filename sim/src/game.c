@@ -437,6 +437,13 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 
 		switch ( hit->type ) {
 		case GE_TRIGGER_MULTIPLE:
+			if ( hit->timedSlot >= 0 ) {
+				// multi_trigger: can't retrigger until the wait is over
+				if ( env->triggerReady[ hit->timedSlot ] > env->levelTime ) {
+					break;
+				}
+				env->triggerReady[ hit->timedSlot ] = hit->wait > 0 ? env->levelTime + (int)( hit->wait * 1000 ) : GS_ITEM_HIDDEN;
+			}
 			G_UseTargets( env, hit );
 			break;
 		case GE_TRIGGER_TELEPORT:
@@ -455,9 +462,14 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 			break;
 		}
 		case GE_TRIGGER_HURT:
-			// DeFRaG maps use trigger_hurt as kill zones; treated as instant death
-			env->dead = 1;
-			return;
+			// hurt_touch: hurt every 100 ms (every second with SLOW); DeFRaG maps mostly
+			// use it as a kill zone, with a dmg of 999
+			if ( env->triggerReady[ hit->timedSlot ] > env->levelTime ) {
+				break;
+			}
+			env->triggerReady[ hit->timedSlot ] = env->levelTime + ( hit->spawnflags & 16 ? 1000 : 100 );
+			G_Damage( env, NULL, hit->dmg, 0, 0 );	// (its NO_PROTECTION flag only beats godmode)
+			break;
 		default:
 			break;
 		}
@@ -496,7 +508,7 @@ static void ClientEvents( gs_env_t *env, int oldEventSequence, const vec3_t trBa
 		switch ( event ) {
 		case EV_FALL_MEDIUM:
 		case EV_FALL_FAR:
-			G_Damage( env, NULL, event == EV_FALL_FAR ? 10 : 5, 0, 0 );
+			G_Damage( env, NULL, event == EV_FALL_FAR ? 10 : 5, GS_DAMAGE_FALLING, 0 );
 			break;
 		case EV_FIRE_WEAPON:
 			G_FireWeapon( env, trBase );

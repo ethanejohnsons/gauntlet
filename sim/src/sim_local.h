@@ -33,6 +33,7 @@
 #define GS_MAX_TARGETS		8
 #define GS_MAX_ITEMS		32				// items tracked per env
 #define GS_MAX_MISSILES		8				// rockets in flight per env
+#define GS_MAX_TIMED_TRIGGERS	32			// triggers with a re-fire delay, tracked per env
 #define GS_MAX_CHECKPOINTS	64				// checkpoint targets tracked per env
 #define GS_ROUTE_MAX_TARGETS	( GS_ROUTE_CHECKPOINT0 + GS_MAX_CHECKPOINTS )
 #define GS_ITEM_HIDDEN		INT_MAX			// itemReady value: not there until something uses it
@@ -86,6 +87,9 @@ typedef struct {
 	const gitem_t	*item;			// items: what it is (bg_itemlist)
 	int				quantity;		// items: seconds of powerup, or ammo, per pickup
 	int				slot;			// items and checkpoints: index into the env's per-player state
+	int				timedSlot;		// triggers with a re-fire delay (item givers, hurts): index
+									// into gs_env.triggerReady, else -1
+	int				dmg;			// trigger_hurt: damage per touch
 } gsEnt_t;
 
 typedef struct {
@@ -98,6 +102,7 @@ typedef struct {
 	int				numUnsupported;
 	int				numItems;
 	int				numCheckpoints;
+	int				numTimedTriggers;
 	int				hasTimer;		// has both start and stop timer targets
 } gsWorld_t;
 
@@ -140,6 +145,8 @@ struct gs_env {
 	// Items are per player, since each env races alone: the level time from which
 	// each item can be picked up again.
 	int				itemReady[GS_MAX_ITEMS];
+	// timed triggers: the level time from which each can fire again
+	int				triggerReady[GS_MAX_TIMED_TRIGGERS];
 
 	// combat (combat.c)
 	int				timeResidual;	// ms towards the next once-a-second health/armor tick
@@ -163,6 +170,7 @@ void	G_ClientThink( gs_env_t *env, const usercmd_t *cmd );
 #define DAMAGE_RADIUS			0x00000001	// damage was indirect (g_local.h)
 #define DAMAGE_NO_ARMOR			0x00000002	// armour does not protect from this damage
 #define DAMAGE_NO_KNOCKBACK		0x00000004	// do not affect velocity, just view angles
+#define GS_DAMAGE_FALLING		0x00000100	// ours: MOD_FALLING, which the battlesuit blocks
 
 void	G_FireWeapon( gs_env_t *env, const vec3_t trBase );
 void	G_RunMissiles( gs_env_t *env, int levelTime );

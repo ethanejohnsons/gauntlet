@@ -74,9 +74,9 @@ void G_Damage( gs_env_t *env, vec3_t dir, int damage, int dflags, int selfInflic
 		}
 	}
 
-	// battlesuit protects from all radius damage (but takes knockback)
+	// battlesuit protects from all radius damage and falling (but takes knockback)
 	if ( ps->powerups[PW_BATTLESUIT] ) {
-		if ( dflags & DAMAGE_RADIUS ) {
+		if ( dflags & ( DAMAGE_RADIUS | GS_DAMAGE_FALLING ) ) {
 			return;
 		}
 		damage *= 0.5;

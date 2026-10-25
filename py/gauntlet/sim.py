@@ -72,6 +72,10 @@ def lib():
         L.gs_env_place.argtypes = [C.c_void_p, Vec3, Vec3, C.c_float]
         L.gs_trace.argtypes = [Vec3, Vec3, C.c_void_p, C.c_void_p, Vec3]
         L.gs_trace.restype = C.c_float
+        L.gs_route_build.argtypes = [C.c_float]
+        L.gs_route_distance.argtypes = [Vec3]
+        L.gs_route_distance.restype = C.c_float
+        L.gs_route_ahead.argtypes = [Vec3, C.c_float, Vec3]
         _lib = L
     return _lib
 
@@ -103,6 +107,24 @@ def trace(start, end):
     hit = Vec3()
     frac = lib().gs_trace(Vec3(*start), Vec3(*end), None, None, hit)
     return frac, (hit[0], hit[1], hit[2])
+
+
+def build_route(cell=0):
+    """Build the loaded map's route (distance to the finish). Takes a few seconds."""
+    L = lib()
+    if L.gs_route_build(cell) < 0:
+        raise RuntimeError(L.gs_last_error().decode())
+
+
+def route_distance(pos):
+    """Distance from pos to the finish along the route, or -1 if not connected."""
+    return lib().gs_route_distance(Vec3(*pos))
+
+
+def route_ahead(pos, ahead):
+    """The point about `ahead` units further along the route, or None."""
+    out = Vec3()
+    return tuple(out) if lib().gs_route_ahead(Vec3(*pos), ahead, out) == 0 else None
 
 
 class Env:

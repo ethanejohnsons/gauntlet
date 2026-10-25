@@ -3,6 +3,7 @@
 // Files:
 //   env.c      the players: the public env API and gs_step_batch's thread pool
 //   world.c    the map: loading, entity parsing, and the world queries pmove uses
+//   route.c    the route: every open place's distance to the finish
 //   game.c     game logic from Q3's game module: spawn, think, triggers, items, timer
 //   pk3.c      reading files out of pk3 (zip) archives
 //   q3_shim.c  stand-ins for the engine services the vendored Q3 code calls

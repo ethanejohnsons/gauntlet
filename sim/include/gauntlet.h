@@ -100,6 +100,21 @@ float		gs_trace( const float start[3], const float end[3], const float mins[3],
 					  const float maxs[3], float endpos[3] );
 void		gs_set_verbose( int level );		// 1: print Q3's messages, 2: also debug ones
 
+// --- the route: distance to the finish -------------------------------------
+//
+// A grid over the map holding, for every place a player fits, the length of the
+// shortest path to the finish zone through open space. Gravity is ignored (the path
+// floats over gaps) and teleporters count as free jumps. Used for rewards ("how much
+// closer did I get?") and to show the way ahead.
+
+// Build it for the loaded map; `cell` is the grid spacing in units (<= 0: 16).
+// Takes a few seconds. Returns 0, or -1 if the map has no finish (see gs_last_error).
+int			gs_route_build( float cell );
+// Distance from pos to the finish along the route, or -1 if pos isn't connected to it.
+float		gs_route_distance( const float pos[3] );
+// The point about `ahead` units further along the route from pos. Returns 0, or -1.
+int			gs_route_ahead( const float pos[3], float ahead, float out[3] );
+
 // --- players ---------------------------------------------------------------
 
 gs_env_t	*gs_env_new( void );

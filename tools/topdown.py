@@ -2,6 +2,8 @@
 """Draw a top-down picture of a map as libgauntlet sees it, with a bot run on top.
 
 The floor comes from collision traces only (no textures): brighter means higher.
+With --route, the floor is coloured by distance to the finish instead (yellow = far,
+purple = near, grey = not connected), from the sim's route.
 Zones from the entity list are outlined: start timer (green), stop timer (red),
 checkpoints (yellow), teleporters (purple), jump pads (cyan), kill zones (dark red).
 The run is the scripted strafe jumper (py/gauntlet/bots.py), coloured by speed.
@@ -97,6 +99,14 @@ def zones():
     return out
 
 
+def route_color(dist, dmax):
+    """Distance to the finish: purple near, yellow far, grey when not connected."""
+    if dist < 0:
+        return (70, 70, 75)
+    t = min(1.0, dist / dmax)
+    return (int(80 + 170 * t), int(40 + 180 * t), int(160 - 120 * t))
+
+
 def speed_color(v, vmax):
     t = max(0.0, min(1.0, (v - 250) / max(1, vmax - 250)))
     return (int(40 + 215 * t), int(120 + 80 * (1 - abs(2 * t - 1))), int(255 * (1 - t)))
@@ -109,6 +119,7 @@ def main():
     ap.add_argument("--q3", default=sim.default_q3_path())
     ap.add_argument("--cell", type=float, default=8, help="units per pixel (default 8)")
     ap.add_argument("--frames", type=int, default=400, help="frames of the bot run")
+    ap.add_argument("--route", action="store_true", help="colour the floor by distance to the finish")
     args = ap.parse_args()
 
     try:
@@ -118,6 +129,10 @@ def main():
 
     heights, w, h = floor_heights(info, args.cell)
     lo, hi = (min(heights.values()), max(heights.values())) if heights else (0, 1)
+    if args.route:
+        sim.build_route()
+        spawn = info.spawn_origin
+        route_max = max(1.0, sim.route_distance((spawn[0], spawn[1], spawn[2] + 9)))
     scale = 2
     img = Image.new("RGB", (w * scale, h * scale), (18, 18, 22))
     d = ImageDraw.Draw(img)
@@ -127,9 +142,16 @@ def main():
                 (h - (y - info.world_mins[1]) / args.cell) * scale)
 
     for (i, j), z in heights.items():
-        g = int(55 + 150 * (z - lo) / max(1, hi - lo))
+        if args.route:
+            # where a standing player's origin would be: 24 units above the floor
+            x = info.world_mins[0] + (i + 0.5) * args.cell
+            y = info.world_mins[1] + (j + 0.5) * args.cell
+            fill = route_color(sim.route_distance((x, y, z + 24.125)), route_max)
+        else:
+            g = int(55 + 150 * (z - lo) / max(1, hi - lo))
+            fill = (g, g, g + 8)
         x0, y0 = i * scale, (h - 1 - j) * scale
-        d.rectangle([x0, y0, x0 + scale - 1, y0 + scale - 1], fill=(g, g, g + 8))
+        d.rectangle([x0, y0, x0 + scale - 1, y0 + scale - 1], fill=fill)
 
     for color, amin, amax in zones():
         x0, y1 = px(amin[0], amin[1])
@@ -143,8 +165,9 @@ def main():
     sx, sy = px(info.spawn_origin[0], info.spawn_origin[1])
     d.ellipse([sx - 5, sy - 5, sx + 5, sy + 5], outline=(255, 255, 255), width=2)
 
-    d.text((8, 6), f"{args.map}  |  floor height: dark = low, light = high  |  "
-                   f"run: blue = slow, red = fast (max {vmax:.0f} ups)", fill=(230, 230, 230))
+    floor = "distance to finish: purple = near, yellow = far" if args.route else "floor height: dark = low, light = high"
+    d.text((8, 6), f"{args.map}  |  {floor}  |  run: blue = slow, red = fast (max {vmax:.0f} ups)",
+           fill=(230, 230, 230))
     out = args.out or f"{args.map}.png"
     img.save(out)
     print(f"wrote {out} ({img.width}x{img.height}), {len(heights)} floor cells, run max {vmax:.0f} ups")

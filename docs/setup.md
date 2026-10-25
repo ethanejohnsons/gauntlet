@@ -115,3 +115,14 @@ tools/play.sh vanilla_01
 In the game, open the console (`~`) and type `/gs_replay runs/vanilla_01_strafe.run`.
 Keyboard and mouse are ignored while it plays; `/gs_replay_stop` stops it. The run's
 first second is standing still, which lines the engine player up with the sim.
+
+## The route
+
+`gs_route_build` computes every open place's distance to the finish (see the comment at
+the top of `sim/src/route.c`). To see it:
+
+```sh
+python3 tools/topdown.py vanilla_02 --route -o build/topdown/vanilla_02_route.png
+```
+
+`build/cmake/sim/test_route <map> v` prints the grid statistics for a map.

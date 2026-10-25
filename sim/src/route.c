@@ -10,12 +10,19 @@
 // A DeFRaG run goes: the start zone (which starts the timer), the checkpoints, then
 // the finish (which stops it). Each of those zones is a target.
 //
-// Gravity is only roughly accounted for, with two costs:
+// Gravity is only roughly accounted for, with two costs and one limit:
 //  - climbing costs CLIMB_COST times as much as moving sideways or down, so the route
 //    goes around tall walls rather than over them, and happily drops down holes;
 //  - moving sideways through "air" (no floor within SUPPORT_HEIGHT below, or only
 //    one inside a kill zone) costs AIR_COST times as much, so the route jumps gaps
-//    when it has to, but takes the long way around a gap nobody could jump.
+//    when it has to, but takes the long way around a gap nobody could jump;
+//  - on maps with few rockets (under PLENTY_ROCKETS in all), the route only climbs as
+//    high as a jump reaches: JUMP_REACH above a floor under where it climbs from, and
+//    not at all from over a pit. Without that it would climb out of places no player
+//    can (tatmt-s2 hands out one rocket, and has a low ledge 64 units below the next
+//    platform, across a kill pit, that the route used to lead straight into). With
+//    rockets to spare, rocket jumps can climb anywhere (vanilla_01's finish is 1200
+//    units up), and so can the route. In and above jump pads, climbing has no limit.
 // That's what we want for a reward. It says which way is forward and how far is left,
 // and leaves *how* to get there (jumping, strafing) to the player.
 
@@ -26,6 +33,12 @@
 #define CLIMB_COST		8.0f	// each unit up counts as this many units of distance
 #define AIR_COST		12.0f	// each unit sideways with no floor below, likewise
 #define SUPPORT_HEIGHT	96.0f	// floor this close below a cell makes it "not air"
+#define JUMP_REACH		63.6f	// a jump lands on a floor this much higher: 45.6 up (JUMP_VELOCITY
+								// 270 against gravity 800) plus an 18 unit step up
+#define STAND_HEIGHT	24.0f	// a cell's center above the floor it stands on (the fit box's bottom)
+#define NO_FLOOR		-1e30f
+#define PAD_FLOOR		1e30f	// in or above a jump pad: climb as high as it goes
+#define PLENTY_ROCKETS	5		// a map handing out this many rockets allows rocket jumps anywhere
 
 // the box used to decide whether a player fits in a cell: crouched, so low passages count
 static const vec3_t	fitMins = { -15, -15, -24 };
@@ -41,6 +54,7 @@ static struct {
 	int		numTargets;
 	int		targetEntity[GS_ROUTE_MAX_TARGETS];	// checkpoint entity per target, -1 for start/finish
 	unsigned char *air;		// per cell: no floor within SUPPORT_HEIGHT below
+	float	*floorZ;		// per cell: the floor below it a jump can start from, NO_FLOOR or PAD_FLOOR
 } route;
 
 static int CellIndex( int x, int y, int z ) {
@@ -154,6 +168,8 @@ typedef struct {
 	int		numGoals[GS_ROUTE_MAX_TARGETS];
 	int		deadly[GS_MAX_ENTITIES];
 	int		numDeadly;
+	int		pads[GS_MAX_ENTITIES];		// jump pads: trigger_push, or a trigger firing a target_push
+	int		numPads;
 	int		teleports[GS_MAX_ENTITIES];
 	int		teleportDestCell[GS_MAX_ENTITIES];		// the open cell each teleport lands in
 	int		numTeleports;
@@ -187,7 +203,50 @@ static void FindTriggers( triggers_t *t ) {
 		if ( TeleportDest( e ) ) {
 			t->teleports[ t->numTeleports++ ] = i;
 		}
+		if ( e->type == GE_TRIGGER_PUSH || ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_PUSH ) ) ) {
+			t->pads[ t->numPads++ ] = i;
+		}
 	}
+}
+
+// Is the box at `center` in a jump pad's trigger, or straight above one (where the
+// pad launches the player)?
+static int InOrAbovePad( const vec3_t center, const triggers_t *t ) {
+	for ( int k = 0; k < t->numPads; k++ ) {
+		const gsEnt_t *pad = &gs_world.ents[ t->pads[k] ];
+		if ( center[0] + fitMaxs[0] > pad->absmin[0] && center[0] + fitMins[0] < pad->absmax[0]
+			&& center[1] + fitMaxs[1] > pad->absmin[1] && center[1] + fitMins[1] < pad->absmax[1]
+			&& center[2] + fitMaxs[2] > pad->absmin[2] ) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// How many rockets the map hands out: rocket launchers and rocket ammo, on the floor
+// or given by a target_give.
+static int RocketSupply( void ) {
+	int rockets = 0;
+	for ( int i = 0; i < gs_world.numEnts; i++ ) {
+		const gsEnt_t *e = &gs_world.ents[i];
+		if ( e->type == GE_ITEM && e->item->giTag == WP_ROCKET_LAUNCHER
+			&& ( e->item->giType == IT_WEAPON || e->item->giType == IT_AMMO ) ) {
+			rockets += e->quantity;
+		}
+	}
+	return rockets;
+}
+
+// Does the spawn point reach the target whose distances are in dist?
+static int SpawnReaches( const float *dist ) {
+	if ( gs_world.spawnEnt < 0 ) {
+		return 1;
+	}
+	vec3_t spawn;
+	VectorCopy( gs_world.ents[ gs_world.spawnEnt ].origin, spawn );
+	spawn[2] += 9;		// SpawnPoint lifts the player above the entity's origin
+	int cell = NearestOpenCell( dist, spawn, 2 );
+	return cell >= 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,7 +332,9 @@ static void Flood( float *dist, const triggers_t *t, const int *goals, int numGo
 
 		// The 26 neighbours. We search backwards from the goal, so the player moves
 		// from the neighbour to this cell: it climbs when dz < 0, and the sideways part
-		// of the step is through air if the neighbour has no floor below.
+		// of the step is through air if the neighbour has no floor below. A climb is
+		// only possible to here if a jump from the neighbour's floor reaches.
+		CellCenter( it.cell, center );
 		for ( int dz = -1; dz <= 1; dz++ ) {
 			float up = dz < 0 ? CLIMB_COST : 1;
 			for ( int dy = -1; dy <= 1; dy++ ) {
@@ -282,6 +343,9 @@ static void Flood( float *dist, const triggers_t *t, const int *goals, int numGo
 						continue;
 					}
 					int n = CellIndex( c[0] + dx, c[1] + dy, c[2] + dz );
+					if ( dz < 0 && center[2] > route.floorZ[n] + STAND_HEIGHT + JUMP_REACH ) {
+						continue;
+					}
 					float side = sqrtf( (float)( dx * dx + dy * dy ) ) * ( route.air[n] ? AIR_COST : 1 );
 					float step = sqrtf( side * side + ( dz * up ) * ( dz * up ) );
 					Relax( dist, n, it.dist + route.cell * step );
@@ -367,9 +431,12 @@ int gs_route_build( float cell ) {
 	}
 	free( route.air );
 	route.air = calloc( numCells, 1 );
+	free( route.floorZ );
+	route.floorZ = malloc( numCells * sizeof( float ) );
 
 	// open cells (the player fits, no lava, no kill zone) start UNREACHED, blocked ones -1
-	float *open = route.dist[0];
+	int rocketJumps = RocketSupply() >= PLENTY_ROCKETS;
+	float *open = malloc( numCells * sizeof( float ) );
 	for ( int c = 0; c < numCells; c++ ) {
 		trace_t tr;
 		CellCenter( c, center );
@@ -388,6 +455,10 @@ int gs_route_build( float cell ) {
 			VectorCopy( tr.endpos, standing );
 			standing[2] += 24;		// a standing player's origin on that floor
 			route.air[c] = tr.fraction == 1.0f || TouchesAny( standing, t.deadly, t.numDeadly );
+			route.floorZ[c] = route.air[c] ? NO_FLOOR : tr.endpos[2];
+			if ( rocketJumps || InOrAbovePad( center, &t ) ) {
+				route.floorZ[c] = PAD_FLOOR;
+			}
 		}
 	}
 
@@ -403,14 +474,29 @@ int gs_route_build( float cell ) {
 		}
 	}
 
-	for ( int k = route.numTargets - 1; k >= 0; k-- ) {
-		if ( k ) {
+	// Flood from every target. If the jump limit leaves the spawn cut off from a target,
+	// the map must need climbs it doesn't know about (jumps off slopes, say): flood
+	// again without it.
+	int limited = !rocketJumps;
+	for ( ;; ) {
+		int connected = 1;
+		for ( int k = 0; k < route.numTargets; k++ ) {
 			memcpy( route.dist[k], open, numCells * sizeof( float ) );
+			Flood( route.dist[k], &t, t.goals[k], t.numGoals[k] );
+			connected &= SpawnReaches( route.dist[k] );
 		}
-		Flood( route.dist[k], &t, t.goals[k], t.numGoals[k] );
+		if ( connected || !limited ) {
+			break;
+		}
+		Com_Printf( "route: the spawn can't reach every zone within jump height; climbing without a limit\n" );
+		for ( int c = 0; c < numCells; c++ ) {
+			route.floorZ[c] = PAD_FLOOR;
+		}
+		limited = 0;
 	}
 
 	free( t.isTeleportDest );
+	free( open );
 
 	int numReached[2] = { 0 };
 	for ( int c = 0; c < numCells; c++ ) {

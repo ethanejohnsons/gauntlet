@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "py"))
 
 from gauntlet import bots, runfile, sim  # noqa: E402
 
-BOTS = {"strafe": bots.StrafeBot, "idle": bots.Idle}
+BOTS = {"strafe": bots.StrafeBot, "idle": bots.Idle, "rocketjump": bots.RocketJumpBot}
 IDLE_FRAMES = 125
 
 
@@ -46,6 +46,7 @@ def main():
     ap.add_argument("-o", "--out", help="write here instead")
     args = ap.parse_args()
 
+    sim.load_map(args.map)      # the bot may look at the map's entities
     run, s = record(args.map, BOTS[args.bot](), args.frames)
     out = Path(args.out) if args.out else Path(args.home) / "defrag/runs" / f"{args.map}_{args.bot}.run"
     out.parent.mkdir(parents=True, exist_ok=True)

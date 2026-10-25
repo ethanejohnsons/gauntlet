@@ -34,7 +34,7 @@ OBS_SIZE = 46                                 # GS_OBS_SIZE in gauntlet.h
 
 # numpy views of gs_cmd_t and gs_state_t (sim/include/gauntlet.h)
 CMD_DTYPE = np.dtype([("angles", np.int32, 3), ("forward", np.int8), ("right", np.int8),
-                      ("up", np.int8), ("buttons", np.uint8)])
+                      ("up", np.int8), ("buttons", np.uint8), ("weapon", np.uint8), ("unused", np.uint8, 3)])
 STATE_DTYPE = np.dtype([(name, np.float32 if t._type_ is C.c_float else np.int32, t._length_)
                         if hasattr(t, "_length_") else (name, np.int32)
                         for name, t in sim.State._fields_])
@@ -82,7 +82,7 @@ class VecEnv:
         for _ in range(SETTLE_FRAMES):
             cmd = idle(s)
             self.settle_frames.append((cmd.angles[0] & 65535, cmd.angles[1] & 65535, cmd.angles[2] & 65535,
-                                       cmd.forward, cmd.right, cmd.up, cmd.buttons))
+                                       cmd.forward, cmd.right, cmd.up, cmd.buttons, cmd.weapon))
             s = start.step(cmd)
         self.snapshot = C.create_string_buffer(L.gs_env_snapshot_size())
         L.gs_env_save(start._env, self.snapshot)
@@ -104,7 +104,7 @@ class VecEnv:
         self.states = np.zeros(self.n, STATE_DTYPE)
         self.route = np.zeros(self.n, np.float32)
         # every frame's input since each env's episode started, for exporting runs
-        self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 7), np.int32)
+        self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 8), np.int32)
         self.frames = np.zeros(self.n, np.int64)
         self.returns = np.zeros(self.n, np.float32)    # reward so far this episode
 

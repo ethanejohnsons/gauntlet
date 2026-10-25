@@ -22,8 +22,11 @@ extern "C" {
 
 #define GS_FRAME_MSEC		8
 
-#define GS_BUTTON_ATTACK	1		// gs_cmd_t.buttons
+#define GS_BUTTON_ATTACK	1		// gs_cmd_t.buttons: fire
 #define GS_BUTTON_WALKING	16
+
+#define GS_WP_MACHINEGUN	2		// gs_cmd_t.weapon (WP_* in bg_public.h)
+#define GS_WP_ROCKET_LAUNCHER	5	// the only weapon the sim fires
 
 #define GS_TIMER_IDLE		0	// not started
 #define GS_TIMER_RUNNING	1
@@ -37,7 +40,9 @@ typedef struct {
 	int8_t	forward;		// -127, 0, 127 on a keyboard
 	int8_t	right;
 	int8_t	up;				// jump > 0, crouch < 0
-	uint8_t	buttons;
+	uint8_t	buttons;		// GS_BUTTON_*
+	uint8_t	weapon;			// weapon to hold (GS_WP_*); 0: keep the current one
+	uint8_t	unused[3];
 } gs_cmd_t;
 
 // What a player looks like after a step.
@@ -57,6 +62,13 @@ typedef struct {
 	int32_t	dead;
 	int32_t	haste_ms;		// haste time left, 0 if none
 	int32_t	flight_ms;
+	int32_t	health;
+	int32_t	armor;
+	int32_t	weapon;			// weapon held (GS_WP_*)
+	int32_t	weapons;		// weapons owned, bit (1 << GS_WP_*)
+	int32_t	rockets;		// rocket launcher ammo
+	int32_t	weapon_time;	// ms until the held weapon can fire again
+	int32_t	rockets_in_flight;
 } gs_state_t;
 
 // Facts about the loaded map.

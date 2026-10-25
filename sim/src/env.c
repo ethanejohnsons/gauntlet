@@ -30,7 +30,7 @@ void gs_env_step( gs_env_t *env, const gs_cmd_t *in ) {
 	cmd.rightmove = in->right;
 	cmd.upmove = in->up;
 	cmd.buttons = in->buttons;
-	cmd.weapon = env->ps.weapon;
+	cmd.weapon = in->weapon ? in->weapon : env->ps.weapon;
 	G_ClientThink( env, &cmd );
 	env->frame++;
 }
@@ -58,6 +58,16 @@ void gs_env_get_state( const gs_env_t *env, gs_state_t *out ) {
 	out->dead = env->dead;
 	out->haste_ms = ps->powerups[PW_HASTE] ? ps->powerups[PW_HASTE] - env->levelTime : 0;
 	out->flight_ms = ps->powerups[PW_FLIGHT] ? ps->powerups[PW_FLIGHT] - env->levelTime : 0;
+	out->health = ps->stats[STAT_HEALTH];
+	out->armor = ps->stats[STAT_ARMOR];
+	out->weapon = ps->weapon;
+	out->weapons = ps->stats[STAT_WEAPONS];
+	out->rockets = ps->ammo[WP_ROCKET_LAUNCHER];
+	out->weapon_time = ps->weaponTime;
+	out->rockets_in_flight = 0;
+	for ( int i = 0; i < GS_MAX_MISSILES; i++ ) {
+		out->rockets_in_flight += env->missiles[i].active;
+	}
 }
 
 size_t gs_env_snapshot_size( void ) {

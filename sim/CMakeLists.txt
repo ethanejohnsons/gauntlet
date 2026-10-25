@@ -41,6 +41,7 @@ add_library(gauntlet SHARED
 add_library(q3game OBJECT
   ${Q3_GAME_SOURCES}
   src/game.c
+  src/combat.c
 )
 foreach(lib gauntlet q3game)
   target_include_directories(${lib} PRIVATE q3/qcommon q3/game src)
@@ -50,14 +51,14 @@ foreach(lib gauntlet q3game)
 endforeach()
 target_compile_options(q3game PRIVATE -fsingle-precision-constant
   -include ${CMAKE_CURRENT_SOURCE_DIR}/q3/game/bg_vmcompat.h)
-set_source_files_properties(src/game.c src/q3_shim.c src/pk3.c src/world.c src/route.c src/env.c src/observe.c
+set_source_files_properties(src/game.c src/combat.c src/q3_shim.c src/pk3.c src/world.c src/route.c src/env.c src/observe.c
   PROPERTIES COMPILE_OPTIONS "${GS_WARNINGS}")
 set_target_properties(q3game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_sources(gauntlet PRIVATE $<TARGET_OBJECTS:q3game>)
 target_link_libraries(gauntlet PRIVATE ZLIB::ZLIB Threads::Threads m)
 
 enable_testing()
-foreach(t test_map test_strafe test_threads test_items test_route test_observe)
+foreach(t test_map test_strafe test_threads test_items test_route test_observe test_rocket)
   add_executable(${t} tests/${t}.c)
   target_compile_options(${t} PRIVATE ${GS_FLOAT_FLAGS})
   target_link_libraries(${t} PRIVATE gauntlet m)

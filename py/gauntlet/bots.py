@@ -2,7 +2,7 @@
 
 import math
 
-from .sim import Cmd, cmd_angle
+from .sim import BUTTON_ATTACK, WP_ROCKET_LAUNCHER, Cmd, cmd_angle
 
 
 def hspeed(s):
@@ -57,4 +57,58 @@ class Idle:
         cmd = Cmd()
         cmd.angles[0] = cmd_angle(s.viewangles[0], s.delta_angles[0])
         cmd.angles[1] = cmd_angle(s.viewangles[1], s.delta_angles[1])
+        return cmd
+
+
+class RocketJumpBot:
+    """Walks to a spot (where a rocket launcher is), then rocket jumps forward again
+    and again: jump, look straight down and fire on the first frame in the air.
+    For checking rockets, splash damage and knockback against the real engine."""
+
+    def __init__(self, goal=None, jumps=4):
+        if goal is None:    # the map's first rocket launcher
+            from .sim import entities
+            goal = next(e["origin"] for e in entities() if e["classname"] == "weapon_rocketlauncher")
+        self.goal = goal
+        self.jumps = jumps
+        self.phase = "walk"
+        self.wait = 0
+        self.yaw = None
+
+    def __call__(self, s):
+        cmd = Cmd()
+        have_rl = bool(s.weapons & (1 << WP_ROCKET_LAUNCHER))
+        if self.phase == "walk":
+            dx, dy = self.goal[0] - s.origin[0], self.goal[1] - s.origin[1]
+            self.yaw = math.degrees(math.atan2(dy, dx))
+            cmd.angles[1] = cmd_angle(self.yaw, s.delta_angles[1])
+            cmd.forward = 127
+            if have_rl:
+                self.phase, self.wait = "raise", 0
+            return cmd
+        cmd.weapon = WP_ROCKET_LAUNCHER
+        cmd.angles[1] = cmd_angle(self.yaw, s.delta_angles[1])
+        if self.phase == "raise":           # stand still while the launcher comes up
+            self.wait += 1
+            cmd.angles[0] = cmd_angle(0, s.delta_angles[0])
+            if self.wait > 60 and s.weapon == WP_ROCKET_LAUNCHER and s.ground_entity >= 0:
+                self.phase = "jump"
+            return cmd
+        cmd.forward = 127
+        if self.phase == "jump":            # jump...
+            cmd.up = 127
+            cmd.angles[0] = cmd_angle(89, s.delta_angles[0])
+            if s.ground_entity < 0:
+                self.phase = "fire"
+            return cmd
+        if self.phase == "fire":            # ...and fire at the floor once airborne
+            cmd.angles[0] = cmd_angle(89, s.delta_angles[0])
+            cmd.buttons = BUTTON_ATTACK
+            if s.weapon_time > 0 or s.rockets == 0:
+                self.phase, self.jumps = "fly", self.jumps - 1
+            return cmd
+        # fly: look ahead, and go again after landing while rockets last
+        cmd.angles[0] = cmd_angle(0, s.delta_angles[0])
+        if s.ground_entity >= 0 and self.jumps > 0 and s.rockets > 0 and s.weapon_time == 0:
+            self.phase = "jump"
         return cmd

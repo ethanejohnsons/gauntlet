@@ -16,6 +16,8 @@
 #define DEFAULT_GRAVITY		800		// g_gravity
 #define DEFAULT_SPEED		320		// g_speed
 #define RESPAWN_POWERUP		120		// seconds, unless the item has a "wait" key
+#define RESPAWN_AMMO		40
+#define RESPAWN_WEAPON		5		// g_weaponRespawn
 
 // ===========================================================================
 // at map load
@@ -158,7 +160,7 @@ void G_InitEntities( void ) {
 		case GE_TARGET_PUSH:
 			SP_target_push( ent );
 			break;
-		case GE_ITEM_POWERUP:
+		case GE_ITEM:
 			FinishSpawningItem( ent );
 			break;
 		default:
@@ -222,6 +224,9 @@ static void TeleportPlayer( gs_env_t *env, const vec3_t origin, const vec3_t ang
 // every frame
 // ===========================================================================
 
+// Touch_Item fires the item's targets, and target_give touches items: they call each other
+static void Touch_Item( gs_env_t *env, gsEnt_t *ent );
+
 /*
 =================
 G_UseEntity
@@ -266,7 +271,17 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 			VectorCopy( ent->pushVelocity, env->ps.velocity );
 		}
 		break;
-	case GE_ITEM_POWERUP:
+	case GE_TARGET_GIVE:
+		// Use_Target_Give: hand over the target items, which then vanish for good
+		for ( int i = 0; i < ent->numTargets; i++ ) {
+			gsEnt_t *t = &gs_world.ents[ ent->targets[i] ];
+			if ( t->type == GE_ITEM ) {
+				Touch_Item( env, t );
+				env->itemReady[ t->slot ] = GS_ITEM_HIDDEN;
+			}
+		}
+		break;
+	case GE_ITEM:
 		// Use_Item: a targeted item appears when used
 		env->itemReady[ ent->slot ] = 0;
 		break;
@@ -295,24 +310,59 @@ static void G_UseTargets( gs_env_t *env, const gsEnt_t *ent ) {
 
 /*
 =================
-Touch_Item / Pickup_Powerup (g_items.c), for powerups
+Touch_Item / Pickup_Powerup / Pickup_Weapon / Pickup_Ammo (g_items.c)
 =================
 */
+static void Add_Ammo( playerState_t *ps, int weapon, int count ) {
+	ps->ammo[weapon] += count;
+	if ( ps->ammo[weapon] > 200 ) {
+		ps->ammo[weapon] = 200;
+	}
+}
+
 static void Touch_Item( gs_env_t *env, gsEnt_t *ent ) {
 	playerState_t *ps = &env->ps;
-	int respawn;
+	const gitem_t *item = ent->item;
+	int respawn, quantity;
 
 	if ( ps->stats[STAT_HEALTH] < 1 ) {
 		return;		// dead people can't pickup
 	}
 
-	if ( !ps->powerups[ ent->powerup ] ) {
-		// round timing to seconds to make multiple powerup timers
-		// count in sync
-		ps->powerups[ ent->powerup ] = env->levelTime - ( env->levelTime % 1000 );
+	switch ( item->giType ) {
+	case IT_POWERUP:
+		if ( !ps->powerups[ item->giTag ] ) {
+			// round timing to seconds to make multiple powerup timers
+			// count in sync
+			ps->powerups[ item->giTag ] = env->levelTime - ( env->levelTime % 1000 );
+		}
+		ps->powerups[ item->giTag ] += ent->quantity * 1000;
+		respawn = RESPAWN_POWERUP;
+		break;
+	case IT_WEAPON:
+		quantity = ent->count < 0 ? 0 : ent->quantity;
+		// drop the quantity if the already have over the minimum
+		if ( ent->count >= 0 ) {
+			if ( ps->ammo[ item->giTag ] < quantity ) {
+				quantity = quantity - ps->ammo[ item->giTag ];
+			} else {
+				quantity = 1;		// only add a single shot
+			}
+		}
+		ps->stats[STAT_WEAPONS] |= ( 1 << item->giTag );
+		Add_Ammo( ps, item->giTag, quantity );
+		respawn = RESPAWN_WEAPON;
+		break;
+	case IT_AMMO:
+		if ( ps->ammo[ item->giTag ] >= 200 ) {
+			return;		// BG_CanItemBeGrabbed: full
+		}
+		Add_Ammo( ps, item->giTag, ent->quantity );
+		respawn = RESPAWN_AMMO;
+		break;
+	default:
+		return;
 	}
-	ps->powerups[ ent->powerup ] += ent->quantity * 1000;
-	respawn = RESPAWN_POWERUP;
 
 	// fire item targets
 	G_UseTargets( env, ent );
@@ -366,7 +416,7 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 
 		// use seperate code for determining if an item is picked up
 		// so you don't have to actually contact its bounding box
-		if ( hit->type == GE_ITEM_POWERUP ) {
+		if ( hit->type == GE_ITEM ) {
 			if ( env->itemReady[ hit->slot ] > env->levelTime ) {
 				continue;	// taken, not linked
 			}
@@ -430,10 +480,60 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 G_ClientThink (ClientThink_real in g_active.c, with DeFRaG's pmove_fixed 1 / pmove_msec 8)
 =================
 */
+/*
+=================
+ClientEvents (g_active.c): falling damage and firing
+=================
+*/
+static void ClientEvents( gs_env_t *env, int oldEventSequence, const vec3_t trBase ) {
+	playerState_t *ps = &env->ps;
+
+	if ( oldEventSequence < ps->eventSequence - MAX_PS_EVENTS ) {
+		oldEventSequence = ps->eventSequence - MAX_PS_EVENTS;
+	}
+	for ( int i = oldEventSequence ; i < ps->eventSequence ; i++ ) {
+		int event = ps->events[ i & ( MAX_PS_EVENTS - 1 ) ];
+		switch ( event ) {
+		case EV_FALL_MEDIUM:
+		case EV_FALL_FAR:
+			G_Damage( env, NULL, event == EV_FALL_FAR ? 10 : 5, 0, 0 );
+			break;
+		case EV_FIRE_WEAPON:
+			G_FireWeapon( env, trBase );
+			break;
+		default:
+			break;
+		}
+	}
+}
+
+/*
+=================
+ClientTimerActions (g_active.c): health and armor over the maximum count down once a second
+=================
+*/
+static void ClientTimerActions( gs_env_t *env, int msec ) {
+	playerState_t *ps = &env->ps;
+
+	env->timeResidual += msec;
+	while ( env->timeResidual >= 1000 ) {
+		env->timeResidual -= 1000;
+		if ( ps->stats[STAT_HEALTH] > ps->stats[STAT_MAX_HEALTH] ) {
+			ps->stats[STAT_HEALTH]--;
+		}
+		if ( ps->stats[STAT_ARMOR] > ps->stats[STAT_MAX_HEALTH] ) {
+			ps->stats[STAT_ARMOR]--;
+		}
+	}
+}
+
 void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 	usercmd_t	ucmd = *cmd;
 	pmove_t		pm;
 	playerState_t *ps = &env->ps;
+	vec3_t		trBase;
+	int			msec = ucmd.serverTime - ps->commandTime;
+	int			oldEventSequence = ps->eventSequence;
 
 	// pmove_fixed: round the command time up to a whole frame
 	ucmd.serverTime = ( ( ucmd.serverTime + GS_FRAME_MSEC - 1 ) / GS_FRAME_MSEC ) * GS_FRAME_MSEC;
@@ -459,9 +559,22 @@ void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 	env->lastCmd = *cmd;
 	env->levelTime = ucmd.serverTime;
 
+	// BG_PlayerStateToEntityState: the snapped origin, which the muzzle and the
+	// server's link of the player use
+	VectorCopy( ps->origin, trBase );
+	SnapVector( trBase );
+
 	// lava and slime kill, like a death pit
 	if ( pm.watertype & ( CONTENTS_LAVA | CONTENTS_SLIME ) ) {
 		env->dead = 1;
+	}
+
+	ClientEvents( env, oldEventSequence, trBase );
+
+	// trap_LinkEntity, from the snapped origin (SV_LinkEntity pads the bounds by 1)
+	for ( int i = 0; i < 3; i++ ) {
+		env->linkMins[i] = trBase[i] + pm.mins[i] - 1;
+		env->linkMaxs[i] = trBase[i] + pm.maxs[i] + 1;
 	}
 
 	G_TouchTriggers( env, pm.mins, pm.maxs );
@@ -473,9 +586,17 @@ void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 		}
 	}
 
+	// perform once-a-second actions
+	if ( !env->dead ) {
+		ClientTimerActions( env, msec );
+	}
+
 	if ( env->timerState == GS_TIMER_RUNNING ) {
 		env->timerMs = ps->commandTime - env->timerStart;
 	}
+
+	// G_RunFrame: the server frame after this command moves the rockets
+	G_RunMissiles( env, env->levelTime + GS_FRAME_MSEC );
 }
 
 // ===========================================================================
@@ -526,7 +647,7 @@ void G_SpawnPlayer( gs_env_t *env ) {
 	// Unlike baseq3, DeFRaG has no 45 s delay before powerups first appear.
 	for ( int i = 0; i < gs_world.numEnts; i++ ) {
 		const gsEnt_t *ent = &gs_world.ents[i];
-		if ( ent->type == GE_ITEM_POWERUP ) {
+		if ( ent->type == GE_ITEM ) {
 			env->itemReady[ ent->slot ] = ent->targetname[0] ? GS_ITEM_HIDDEN : 0;
 		}
 	}

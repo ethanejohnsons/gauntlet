@@ -20,9 +20,13 @@ def default_q3_path():
     return os.environ.get("GAUNTLET_Q3", str(Path.home() / "Games/quake3"))
 
 
+BUTTON_ATTACK = 1
+WP_MACHINEGUN, WP_ROCKET_LAUNCHER = 2, 5
+
+
 class Cmd(C.Structure):
     _fields_ = [("angles", C.c_int32 * 3), ("forward", C.c_int8), ("right", C.c_int8),
-                ("up", C.c_int8), ("buttons", C.c_uint8)]
+                ("up", C.c_int8), ("buttons", C.c_uint8), ("weapon", C.c_uint8), ("unused", C.c_uint8 * 3)]
 
 
 class State(C.Structure):
@@ -31,7 +35,9 @@ class State(C.Structure):
                 ("command_time", C.c_int32), ("pm_flags", C.c_int32), ("pm_time", C.c_int32),
                 ("ground_entity", C.c_int32), ("frame", C.c_int32), ("timer_state", C.c_int32),
                 ("timer_ms", C.c_int32), ("checkpoints", C.c_int32), ("dead", C.c_int32),
-                ("haste_ms", C.c_int32), ("flight_ms", C.c_int32)]
+                ("haste_ms", C.c_int32), ("flight_ms", C.c_int32), ("health", C.c_int32),
+                ("armor", C.c_int32), ("weapon", C.c_int32), ("weapons", C.c_int32), ("rockets", C.c_int32),
+                ("weapon_time", C.c_int32), ("rockets_in_flight", C.c_int32)]
 
 
 class MapInfo(C.Structure):

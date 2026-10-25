@@ -6,6 +6,7 @@
 //   world.c    the map: loading, entity parsing, and the world queries pmove uses
 //   route.c    the route: every open place's distance to the finish
 //   game.c     game logic from Q3's game module: spawn, think, triggers, items, timer
+//   combat.c   the rocket launcher: firing, rockets in flight, splash damage, knockback
 //   pk3.c      reading files out of pk3 (zip) archives
 //   q3_shim.c  stand-ins for the engine services the vendored Q3 code calls
 //
@@ -30,7 +31,8 @@
 #define GS_FIRST_ENTITY		MAX_CLIENTS		// map entities are numbered from here, like g_entities
 #define GS_MAX_ENTITIES		(MAX_GENTITIES - MAX_CLIENTS)
 #define GS_MAX_TARGETS		8
-#define GS_MAX_ITEMS		32				// powerup items tracked per env
+#define GS_MAX_ITEMS		32				// items tracked per env
+#define GS_MAX_MISSILES		8				// rockets in flight per env
 #define GS_MAX_CHECKPOINTS	64				// checkpoint targets tracked per env
 #define GS_ITEM_HIDDEN		INT_MAX			// itemReady value: not there until something uses it
 
@@ -53,7 +55,8 @@ typedef enum {
 	GE_TARGET_KILL,
 	GE_TARGET_TELEPORTER,
 	GE_TARGET_PUSH,
-	GE_ITEM_POWERUP,		// item_haste, item_flight
+	GE_TARGET_GIVE,			// gives its target items to the player
+	GE_ITEM,				// a pickup the sim simulates: haste, flight, battlesuit, rocket launcher, rockets
 } gsEntType_t;
 
 typedef struct {
@@ -79,8 +82,8 @@ typedef struct {
 
 	vec3_t			pushVelocity;	// trigger_push / target_push: launch velocity (s.origin2)
 
-	int				powerup;		// items: PW_HASTE or PW_FLIGHT
-	int				quantity;		// items: seconds given per pickup
+	const gitem_t	*item;			// items: what it is (bg_itemlist)
+	int				quantity;		// items: seconds of powerup, or ammo, per pickup
 	int				slot;			// items and checkpoints: index into the env's per-player state
 } gsEnt_t;
 
@@ -109,6 +112,14 @@ void	GS_SetError( const char *fmt, ... ) __attribute__ (( format( printf, 1, 2 )
 // ---------------------------------------------------------------------------
 // the players (env.c)
 
+// a rocket in flight (fire_rocket in g_missile.c)
+typedef struct {
+	int				active;
+	trajectory_t	pos;			// TR_LINEAR from the muzzle at 900 ups
+	vec3_t			currentOrigin;
+	int				explodeTime;	// level time it explodes by itself (15 s after firing)
+} gsMissile_t;
+
 struct gs_env {
 	playerState_t	ps;
 	usercmd_t		lastCmd;		// the last command received (pers.cmd)
@@ -125,8 +136,14 @@ struct gs_env {
 	int				dead;
 
 	// Items are per player, since each env races alone: the level time from which
-	// each powerup item can be picked up again.
+	// each item can be picked up again.
 	int				itemReady[GS_MAX_ITEMS];
+
+	// combat (combat.c)
+	int				timeResidual;	// ms towards the next once-a-second health/armor tick
+	vec3_t			linkMins;		// the player's linked bounds (absmin / absmax), from
+	vec3_t			linkMaxs;		// the snapped origin, as the server last linked it
+	gsMissile_t		missiles[GS_MAX_MISSILES];
 };
 
 // run fn( i, ctx ) for every i < n, spread over nthreads threads
@@ -139,6 +156,15 @@ void	G_InitEntities( void );
 void	G_SpawnPlayer( gs_env_t *env );
 void	G_PlacePlayer( gs_env_t *env, const vec3_t origin, const vec3_t velocity, float yaw );
 void	G_ClientThink( gs_env_t *env, const usercmd_t *cmd );
+
+// combat.c (compiled with QVM float semantics too)
+#define DAMAGE_RADIUS			0x00000001	// damage was indirect (g_local.h)
+#define DAMAGE_NO_ARMOR			0x00000002	// armour does not protect from this damage
+#define DAMAGE_NO_KNOCKBACK		0x00000004	// do not affect velocity, just view angles
+
+void	G_FireWeapon( gs_env_t *env, const vec3_t trBase );
+void	G_RunMissiles( gs_env_t *env, int levelTime );
+void	G_Damage( gs_env_t *env, vec3_t dir, int damage, int dflags, int selfInflicted );
 
 // ---------------------------------------------------------------------------
 // pk3.c

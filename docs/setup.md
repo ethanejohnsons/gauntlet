@@ -88,7 +88,7 @@ Needs `cmake`, `ninja` and `zlib`. Build from the repo root:
 ```sh
 cmake -S . -B build/cmake -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/cmake
-ctest --test-dir build/cmake      # map load, strafe, threads, items, route, observations
+ctest --test-dir build/cmake      # map load, strafe, threads, items, route, observations, rocket jump
 build/cmake/sim/bench             # steps per second across thread counts
 ```
 

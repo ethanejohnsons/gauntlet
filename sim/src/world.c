@@ -47,8 +47,12 @@ static const struct {
 	{ "target_kill",			GE_TARGET_KILL },
 	{ "target_teleporter",		GE_TARGET_TELEPORTER },
 	{ "target_push",			GE_TARGET_PUSH },
-	{ "item_haste",				GE_ITEM_POWERUP },
-	{ "item_flight",			GE_ITEM_POWERUP },
+	{ "item_haste",				GE_ITEM },
+	{ "item_flight",			GE_ITEM },
+	{ "item_enviro",			GE_ITEM },		// battlesuit: no splash damage
+	{ "weapon_rocketlauncher",	GE_ITEM },
+	{ "ammo_rockets",			GE_ITEM },
+	{ "target_give",			GE_TARGET_GIVE },
 
 	// target_give is left out on purpose: it can hand out a weapon a map needs (a
 	// rocket jump over a gap), which the sim can't do yet, so it counts as unsupported
@@ -74,7 +78,6 @@ static const struct {
 	{ "item_health_small",		GE_IGNORED },
 	{ "item_health_large",		GE_IGNORED },
 	{ "item_health_mega",		GE_IGNORED },
-	{ "item_enviro",			GE_IGNORED },
 	{ "item_quad",				GE_IGNORED },
 	{ "item_regen",				GE_IGNORED },
 	{ "item_invis",				GE_IGNORED },
@@ -86,20 +89,22 @@ static gsEntType_t ClassType( const char *classname ) {
 			return classTypes[i].type;
 		}
 	}
-	// weapons and ammo only matter if the player fires
+	// other weapons and ammo only matter if the player fires them, which the sim
+	// doesn't (it only fires the rocket launcher)
 	if ( !Q_stricmpn( classname, "weapon_", 7 ) || !Q_stricmpn( classname, "ammo_", 5 ) ) {
 		return GE_IGNORED;
 	}
 	return GE_UNSUPPORTED;
 }
 
-// Look the powerup up in bg_itemlist. It is linked later, once it has dropped to
-// the floor (FinishSpawningItem in game.c).
-static int SetupPowerup( gsEnt_t *ent ) {
+// Look the item up in bg_itemlist. It is linked later, once it has dropped to the
+// floor (FinishSpawningItem in game.c).
+static int SetupItem( gsEnt_t *ent ) {
 	for ( const gitem_t *it = bg_itemlist + 1; it->classname; it++ ) {
-		if ( !Q_stricmp( it->classname, ent->classname ) && it->giType == IT_POWERUP ) {
-			ent->powerup = it->giTag;
-			ent->quantity = ent->count ? ent->count : it->quantity;	// as in Pickup_Powerup
+		if ( !Q_stricmp( it->classname, ent->classname ) ) {
+			ent->item = it;
+			// as in Pickup_Powerup / Pickup_Weapon / Pickup_Ammo
+			ent->quantity = ent->count ? ent->count : it->quantity;
 			ent->slot = gs_world.numItems++;
 			return 1;
 		}
@@ -173,9 +178,9 @@ static int ParseEntity( const char **p, gsEnt_t *ent, float *random ) {
 static void SetupEntity( gsEnt_t *ent, float random ) {
 	ent->type = ClassType( ent->classname );
 
-	if ( ent->type == GE_ITEM_POWERUP ) {
+	if ( ent->type == GE_ITEM ) {
 		// a random respawn time can't be reproduced, so such maps aren't trusted
-		if ( random || gs_world.numItems == GS_MAX_ITEMS || !SetupPowerup( ent ) ) {
+		if ( random || gs_world.numItems == GS_MAX_ITEMS || !SetupItem( ent ) ) {
 			ent->type = GE_UNSUPPORTED;
 		}
 	}

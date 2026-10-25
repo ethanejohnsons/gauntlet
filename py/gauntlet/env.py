@@ -202,6 +202,10 @@ class VecEnv:
         done_so_far = self.leg_starts[leg + 1] - route
         return np.clip(done_so_far / self.start_route, 0, 1)
 
+    def _leg_route(self, route, leg):
+        """Distances left on each leg, counting one without a value as the whole leg."""
+        return np.where(route < 0, self.leg_starts[leg + 1] - self.leg_starts[leg], route)
+
     def _observe(self, indices=None):
         """Fill obs, states and route for every player, or just for some."""
         if indices is None:
@@ -238,7 +242,8 @@ class VecEnv:
     def _cells(self, indices):
         """The restart cell each player is in: leg, progress slice, and what it carries."""
         s = self.states[indices]
-        progress = (self._progress(self.route[indices], self.leg[indices]) * PROGRESS_CELLS).astype(np.int64)
+        progress = (self._progress(self._leg_route(self.route[indices], self.leg[indices]), self.leg[indices])
+                    * PROGRESS_CELLS).astype(np.int64)
         has_rl = (s["weapons"] >> sim.WP_ROCKET_LAUNCHER) & 1
         carry = np.minimum(s["rockets"], 3) * 2 + has_rl
         return (self.leg[indices] * (PROGRESS_CELLS + 1) + progress) * 8 + carry
@@ -377,13 +382,15 @@ class VecEnv:
         # checkpoint zone is reached when the route to it is (about) zero
         target = self.leg_targets[self.leg]
         on_last_leg = self.leg == len(self.legs) - 1
+        known = (prev_route >= 0) & (self.route >= 0)    # distances with a value, before and now
         reached = np.where(target == sim.ROUTE_START, (prev_timer == 0) & (timer != 0),
-                           (target >= sim.ROUTE_CHECKPOINT0) & (self.route <= CHECKPOINT_RADIUS))
+                           (target >= sim.ROUTE_CHECKPOINT0) & (self.route >= 0) & (self.route <= CHECKPOINT_RADIUS))
         reached &= ~on_last_leg & ~dead
 
         # progress on the current leg; none on a step that reaches a zone (the next
-        # distance is to a different zone), finishes or dies
-        progress = np.where(dead | reached | finished, 0, prev_route - self.route)
+        # distance is to a different zone), finishes or dies, or where a distance has
+        # no value (right after a zone, the player can be somewhere the route can't see)
+        progress = np.where(dead | reached | finished | ~known, 0, prev_route - self.route)
         reward = progress * PROGRESS_SCALE
         reward += np.where(reached, ZONE_BONUS, 0)
         reward += np.where(finished, FINISH_BONUS, 0)
@@ -417,9 +424,8 @@ class VecEnv:
                 "scout": self.scout[ended].copy(),
                 "synthetic": self.synthetic[ended].copy(),
                 # how far along the run each got (for dead players, where they were last alive)
-                "progress": np.where(finished[ended], 1.0,
-                                     self._progress(np.where(dead, prev_route, self.route)[ended],
-                                                    self.leg[ended])),
+                "progress": np.where(finished[ended], 1.0, self._progress(self._leg_route(
+                    np.where(dead, prev_route, self.route)[ended], self.leg[ended]), self.leg[ended])),
             }
             info["runs"] = {i: self.history[i, :self.frames[i]].copy() for i in ended}
             info["decisions"] = {i: self._decisions_of(i) for i in ended}

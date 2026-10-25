@@ -14,24 +14,33 @@ Rewards come from the route (sim/src/route.c). A run is a list of legs, one per 
 the start zone (which starts the timer), each checkpoint (nearest next, along the
 route), then the finish. On each leg, getting closer earns points; reaching a zone
 earns a small bonus and finishing a big one; each rocket fired costs a little. Dying
-ends the episode and takes back the points earned on the current leg (as if
-respawning at the last zone reached):
-"rush ahead, then die" never pays, but earlier legs are safe, so trying a risky jump
-isn't a gamble with the whole run. (Taking back the whole episode's points made the
-AI stand still in front of the first dangerous jump rather than risk it.)
-Episodes also end after max_seconds. Every frame's input is kept, so any episode can
-be exported as a .run file and replayed in the real game.
+ends the episode and takes back the points of the last DEATH_WINDOW seconds, but
+none from before the last zone reached (as if respawning where the player was a few
+seconds ago): "rush ahead, then die" never pays, but what came before is safe, so
+trying a risky jump isn't a gamble with the whole run. Taking back the whole
+episode's points made the AI stand still in front of the first dangerous jump
+rather than risk it; taking back the whole leg's did the same on maps with a long
+last leg (tatmt-s2's runs from the last checkpoint to the finish).
+Episodes also end after max_seconds, or after STUCK_SECONDS without getting closer to
+the current zone (players stuck in front of a jump make way for new episodes instead
+of waiting out the clock). Every frame's input is kept, so any episode can be
+exported as a .run file and replayed in the real game.
 
 Restart points (as in Go-Explore): the env remembers a snapshot of the places
 players reach, one per cell (a leg, a slice of the run's progress, and what the
 player carries: the rocket launcher, rockets). With restart_fraction > 0, that share
-of episodes starts from a remembered cell instead of the spawn, rarely visited cells
-first. This matters on maps where a mistake shows only much later: on tatmt-s2 the
+of episodes starts from a remembered cell instead of the spawn, cells few episodes
+have reached first. This matters on maps where a mistake shows only much later: on tatmt-s2 the
 map hands out one rocket for one rocket jump, and a player who fires it on the way
 there is stuck 20 seconds later. Restarting near the jump with the rocket still in
 hand lets the AI learn the jump, and then that the rocket is worth keeping. A
 snapshot keeps the inputs that led to it, so a restarted episode is still a whole
 run from the spawn, timer included, and exports like any other.
+
+Scouts help find such places: the last `scouts` players never fire (they keep their
+ammo for later) and always start at the spawn. They aren't trained on (train/ppo.py
+leaves them out) and their visits don't count, so a cell only scouts have reached,
+like "at the rocket jump, rocket still in hand", is where restarts go first.
 """
 
 import collections
@@ -65,7 +74,8 @@ ZONE_BONUS = 0.5            # the start zone or a checkpoint reached. Keep it be
                             # penalty: on maps whose start line hangs over a pit, a bigger
                             # bonus pays for jumping in, starting the timer and dying.
 FINISH_BONUS = 10.0
-DEATH_PENALTY = -1.0        # on top of losing the current leg's points
+DEATH_PENALTY = -1.0        # on top of losing the last few seconds' points
+DEATH_WINDOW = 5.0          # seconds of points a death takes back
 ROCKET_COST = 0.25          # per rocket fired, so the AI fires only when the shot pays for
                             # itself (a rocket jump gains far more). Ammo can be scarce: on
                             # tatmt-s2 a rocket wasted on the way leaves no way up later.
@@ -73,11 +83,13 @@ ROCKET_COST = 0.25          # per rocket fired, so the AI fires only when the sh
 # penalty and teach the AI to die early. Discounting (gamma in train/ppo.py) already
 # makes sooner rewards worth more, which is what rewards speed.
 CHECKPOINT_RADIUS = 8       # route distance at which a checkpoint zone counts as reached
+STUCK_SECONDS = 10          # an episode ends after this long without getting a route cell
+                            # (16 units) closer to the current zone
 
 PROGRESS_CELLS = 100        # restart cells: slices of the run's progress per leg
 
 # a remembered place to restart from: the env, and the episode so far
-Restart = collections.namedtuple("Restart", "snapshot leg frames history returns leg_returns")
+Restart = collections.namedtuple("Restart", "snapshot leg frames history returns recent")
 
 
 def _ptr(array):
@@ -85,7 +97,7 @@ def _ptr(array):
 
 
 class VecEnv:
-    def __init__(self, mapname, num_envs, max_seconds=30, threads=None, restart_fraction=0.0):
+    def __init__(self, mapname, num_envs, max_seconds=30, threads=None, restart_fraction=0.0, scouts=0):
         self.map = mapname
         self.n = num_envs
         self.threads = threads or os.cpu_count()
@@ -131,15 +143,23 @@ class VecEnv:
         self.states = np.zeros(self.n, STATE_DTYPE)
         self.route = np.zeros(self.n, np.float32)       # distance to the current leg's zone
         self.leg = np.zeros(self.n, np.int64)
+        self.closest = np.full(self.n, np.inf, np.float32)   # closest to the current zone so far
+        self.closer_frame = np.zeros(self.n, np.int64)       # the frame it last got closer
         # every frame's input since each env's episode started, for exporting runs
         self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 8), np.int32)
         self.frames = np.zeros(self.n, np.int64)
         self.returns = np.zeros(self.n, np.float32)    # reward so far this episode
-        self.leg_returns = np.zeros(self.n, np.float32)  # reward so far on the current leg
+        # the reward of each of the last DEATH_WINDOW seconds' decisions since the last
+        # zone, a ring indexed by self.tick (the slot of tick % size is the oldest)
+        self.recent = np.zeros((self.n, int(DEATH_WINDOW * 1000 / (FRAMES_PER_ACTION * sim.FRAME_MSEC))), np.float32)
+        self.tick = 0
 
-        # restart points: cell -> Restart (the fastest arrival there so far), and
-        # how many decisions have been made in each cell
+        # restart points: cell -> Restart (the fastest arrival there so far), how many
+        # episodes (of players that aren't scouts) have reached each cell, and the cells
+        # each player's episode has been in
         self.restart_fraction = restart_fraction
+        self.seen = [set() for _ in range(self.n)]
+        self.scout = np.arange(self.n) >= self.n - scouts
         self.restarts = {}
         self.visits = collections.Counter()
         self.from_spawn = np.ones(self.n, bool)        # this episode started at the spawn
@@ -160,6 +180,10 @@ class VecEnv:
         self.leg[i] = leg
         self.lib.gs_env_set_route_target(self.envs[i], int(self.leg_targets[leg]))
 
+    def _recent_in_order(self, i):
+        """Player i's recent rewards, oldest first (np.roll by self.tick puts them back)."""
+        return np.roll(self.recent[i], -self.tick)
+
     def _cells(self, indices):
         """The restart cell each player is in: leg, progress slice, and what it carries."""
         s = self.states[indices]
@@ -169,40 +193,48 @@ class VecEnv:
         return (self.leg[indices] * (PROGRESS_CELLS + 1) + progress) * 8 + carry
 
     def _remember(self, indices):
-        """Count a decision in each player's cell, and remember the cell if this is the
-        fastest anyone has got there."""
+        """Count each player's cell if its episode is new there, and remember the cell
+        if this is the fastest anyone has got there."""
         cells = self._cells(indices)
-        self.visits.update(dict(zip(*np.unique(cells, return_counts=True))))
         for i, cell in zip(indices, cells):
+            if cell not in self.seen[i]:
+                self.seen[i].add(cell)
+                if not self.scout[i]:
+                    self.visits[cell] += 1
             kept = self.restarts.get(cell)
             if kept is None or self.frames[i] < kept.frames:
                 snapshot = C.create_string_buffer(len(self.snapshot))
                 self.lib.gs_env_save(self.envs[i], snapshot)
                 self.restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
                                               self.history[i, :self.frames[i]].copy(),
-                                              float(self.returns[i]), float(self.leg_returns[i]))
+                                              float(self.returns[i]), self._recent_in_order(i))
 
     def _restart(self, indices):
         """Start new episodes: from the spawn, or (restart_fraction of them) from a
-        remembered cell, picked with weight 1 / sqrt(visits + 1)."""
+        remembered cell, picked with weight 1 / sqrt(episodes that reached it + 1)."""
         restart = self.rng.random(len(indices)) < self.restart_fraction if self.restarts else np.zeros(len(indices), bool)
+        restart &= ~self.scout[indices]
         if restart.any():
             cells = list(self.restarts)
             weight = 1 / np.sqrt(np.array([self.visits[c] for c in cells]) + 1)
             picks = iter(self.rng.choice(len(cells), size=restart.sum(), p=weight / weight.sum()))
         for k, i in enumerate(indices):
+            self.seen[i] = set()
             if restart[k]:
                 kept = self.restarts[cells[next(picks)]]
                 self.lib.gs_env_restore(self.envs[i], kept.snapshot)
                 self._set_leg(i, kept.leg)
                 self.frames[i] = kept.frames
                 self.history[i, :kept.frames] = kept.history
-                self.returns[i], self.leg_returns[i] = kept.returns, kept.leg_returns
+                self.returns[i] = kept.returns
+                self.recent[i] = np.roll(kept.recent, self.tick)
             else:
                 self.lib.gs_env_restore(self.envs[i], self.snapshot)
                 self._set_leg(i, 0)
-                self.frames[i] = self.returns[i] = self.leg_returns[i] = 0
+                self.frames[i] = self.returns[i] = self.recent[i] = 0
         self.from_spawn[indices] = ~restart
+        self.closest[indices] = np.inf
+        self.closer_frame[indices] = self.frames[indices]
 
     def reset(self):
         self._restart(np.arange(self.n))
@@ -217,7 +249,7 @@ class VecEnv:
         side = (actions[:, 1] - 1) * 127
         jump = actions[:, 2] * 127
         turn = TURN_RATES[actions[:, 3]]
-        fire = actions[:, 4] * sim.BUTTON_ATTACK
+        fire = np.where(self.scout, 0, actions[:, 4]) * sim.BUTTON_ATTACK
         pitch = PITCHES[actions[:, 5]]
 
         prev_route = self.route.copy()
@@ -254,6 +286,10 @@ class VecEnv:
         self.route = np.where(self.route < 0, prev_route, self.route)
         finished = timer == 2
         timeout = self.frames >= self.max_frames
+        closer = self.route < self.closest - 16
+        self.closest = np.where(closer, self.route, self.closest)
+        self.closer_frame = np.where(closer, self.frames, self.closer_frame)
+        timeout |= self.frames - self.closer_frame > STUCK_SECONDS * 1000 / sim.FRAME_MSEC
 
         # reaching the current leg's zone: the start zone starts the timer, a
         # checkpoint zone is reached when the route to it is (about) zero
@@ -270,15 +306,18 @@ class VecEnv:
         reward += np.where(reached, ZONE_BONUS, 0)
         reward += np.where(finished, FINISH_BONUS, 0)
         reward -= np.maximum(prev_rockets - self.states["rockets"], 0) * ROCKET_COST
-        reward += np.where(dead, DEATH_PENALTY - self.leg_returns - reward, 0)
+        reward += np.where(dead, DEATH_PENALTY - self.recent.sum(1) - reward, 0)
         self.returns += reward
-        self.leg_returns = np.where(reached, 0, self.leg_returns + reward)   # a new leg starts from zero
+        self.recent[:, self.tick % self.recent.shape[1]] = reward
+        self.recent[reached] = 0        # points from before a zone are safe
+        self.tick += 1
         done = dead | finished | timeout
 
         # next leg for whoever reached their zone
         for i in np.nonzero(reached & ~done)[0]:
             self._set_leg(i, self.leg[i] + 1)
             self.route[i] = sim.route_distance(tuple(self.states["origin"][i]), int(self.leg_targets[self.leg[i]]))
+            self.closest[i], self.closer_frame[i] = self.route[i], self.frames[i]
         if self.restart_fraction > 0:
             self._remember(np.nonzero(~done)[0])
 
@@ -293,6 +332,7 @@ class VecEnv:
                 "frames": self.frames[ended].copy(),
                 "returns": self.returns[ended].copy(),
                 "from_spawn": self.from_spawn[ended].copy(),
+                "scout": self.scout[ended].copy(),
                 # how far along the run each got (for dead players, where they were last alive)
                 "progress": np.where(finished[ended], 1.0,
                                      self._progress(np.where(dead, prev_route, self.route)[ended],

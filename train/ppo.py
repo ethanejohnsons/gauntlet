@@ -96,7 +96,13 @@ def parse_args():
     ap.add_argument("--init", help="start from this agent.pt instead of a fresh network")
     ap.add_argument("--restarts", type=float, default=0.25,
                     help="share of episodes that start from a remembered place instead of the spawn")
-    return ap.parse_args()
+    ap.add_argument("--scouts", type=int,
+                    help="players that never fire and aren't trained on; they find places to restart "
+                         "from (default: 1 in 16 players)")
+    args = ap.parse_args()
+    if args.scouts is None:
+        args.scouts = args.envs // 16
+    return args
 
 
 def main():
@@ -109,7 +115,7 @@ def main():
     writer.add_text("args", str(vars(args)))
 
     env = VecEnv(args.map, args.envs, max_seconds=args.max_seconds, threads=args.threads,
-                 restart_fraction=args.restarts)
+                 restart_fraction=args.restarts, scouts=args.scouts)
     agent = Agent().to(device)
     if args.init:
         agent.load_state_dict(torch.load(args.init, map_location=device))
@@ -147,8 +153,8 @@ def main():
             decisions += N
 
             if info:
-                # (the averages count only episodes that started at the spawn)
-                spawn = info["from_spawn"]
+                # (the averages count only the learners' episodes that started at the spawn)
+                spawn = info["from_spawn"] & ~info["scout"]
                 episodes += len(info["ended"])
                 ended_progress += list(info["progress"][spawn])
                 ended_returns += list(info["returns"][spawn])
@@ -179,9 +185,11 @@ def main():
             returns = advantages + val_buf
 
         # --- 3. learn: a few passes of small, clipped updates ----------------
-        b_obs, b_act = obs_buf.reshape(-1, OBS_SIZE), act_buf.reshape(-1, len(ACTION_SIZES))
-        b_logp, b_adv, b_ret = logp_buf.reshape(-1), advantages.reshape(-1), returns.reshape(-1)
-        batch = T * N
+        # (on the learners only: scouts, the last columns, don't play by the policy)
+        L = N - args.scouts
+        b_obs, b_act = obs_buf[:, :L].reshape(-1, OBS_SIZE), act_buf[:, :L].reshape(-1, len(ACTION_SIZES))
+        b_logp, b_adv, b_ret = logp_buf[:, :L].reshape(-1), advantages[:, :L].reshape(-1), returns[:, :L].reshape(-1)
+        batch = T * L
         mb = batch // args.minibatches
         for _ in range(args.epochs):
             order = torch.randperm(batch, device=device)

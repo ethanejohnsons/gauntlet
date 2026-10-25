@@ -41,7 +41,8 @@ engine() {
 	SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy timeout 300 "$ENGINE" \
 		+set fs_basepath "$Q3" +set fs_homepath "$HOME_Q3" +set fs_game defrag \
 		+set r_fullscreen 0 +set r_mode -1 +set r_customwidth "$WIDTH" +set r_customheight "$HEIGHT" \
-		+set s_initsound 0 +set cl_allowDownload 0 +set com_maxfps 125 "$@" > "$ROOT/build/odfe-$NAME.log" 2>&1
+		+set s_initsound 0 +set cl_allowDownload 0 +set com_maxfps 125 \
+		+set net_enabled 1 +set net_ip 127.0.0.1 "$@" > "$ROOT/build/odfe-$NAME.log" 2>&1
 }
 
 echo "replaying in oDFe and recording a demo..."

@@ -9,7 +9,10 @@ at random by its own probabilities, as in training, so attempts differ; with
 
     <out>.run         the inputs, for gs_replay / tools/render_run.sh
     <out>.think.npz   what the network computed at every decision of that same
-                      attempt (layout: tools/think.py)
+                      attempt, one row per decision: frame (first frame of the
+                      decision, counting the settle frames), obs, hidden1, hidden2
+                      (after tanh), probs (every choice), action (the choices made)
+                      and value (the reward it expected from there on)
 
 Both come from the same playthrough, so the overlay can't drift from what the
 network did.

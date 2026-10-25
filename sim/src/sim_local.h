@@ -34,6 +34,7 @@
 #define GS_MAX_ITEMS		32				// items tracked per env
 #define GS_MAX_MISSILES		8				// rockets in flight per env
 #define GS_MAX_CHECKPOINTS	64				// checkpoint targets tracked per env
+#define GS_ROUTE_MAX_TARGETS	( GS_ROUTE_CHECKPOINT0 + GS_MAX_CHECKPOINTS )
 #define GS_ITEM_HIDDEN		INT_MAX			// itemReady value: not there until something uses it
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,7 @@ struct gs_env {
 	int				checkpoints;	// distinct checkpoints touched since the timer started
 	char			checkpointSeen[GS_MAX_CHECKPOINTS];
 	int				dead;
+	int				routeTarget;	// gs_env_set_route_target; -1: by the timer
 
 	// Items are per player, since each env races alone: the level time from which
 	// each item can be picked up again.

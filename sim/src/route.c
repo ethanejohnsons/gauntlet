@@ -7,8 +7,8 @@
 // (Dijkstra's algorithm, once per target). Teleporters count as a free jump from the
 // trigger to the destination.
 //
-// A DeFRaG run has two legs: get to the start zone (which starts the timer), then to
-// the finish (which stops it). Hence two targets.
+// A DeFRaG run goes: the start zone (which starts the timer), the checkpoints, then
+// the finish (which stops it). Each of those zones is a target.
 //
 // Gravity is only roughly accounted for, with two costs:
 //  - climbing costs CLIMB_COST times as much as moving sideways or down, so the route
@@ -37,7 +37,9 @@ static struct {
 	vec3_t	origin;			// world position of the corner of cell (0, 0, 0)
 	int		size[3];
 	// per target, per cell: distance to the target zone, or -1 if blocked or unreachable
-	float	*dist[GS_ROUTE_TARGETS];
+	float	*dist[GS_ROUTE_MAX_TARGETS];
+	int		numTargets;
+	int		targetEntity[GS_ROUTE_MAX_TARGETS];	// checkpoint entity per target, -1 for start/finish
 	unsigned char *air;		// per cell: no floor within SUPPORT_HEIGHT below
 } route;
 
@@ -140,8 +142,8 @@ static const gsEnt_t *TeleportDest( const gsEnt_t *trigger ) {
 }
 
 typedef struct {
-	int		goals[GS_ROUTE_TARGETS][GS_MAX_ENTITIES];	// start-zone and finish triggers
-	int		numGoals[GS_ROUTE_TARGETS];
+	int		goals[GS_ROUTE_MAX_TARGETS][GS_MAX_ENTITIES];	// the triggers of each target zone
+	int		numGoals[GS_ROUTE_MAX_TARGETS];
 	int		deadly[GS_MAX_ENTITIES];
 	int		numDeadly;
 	int		teleports[GS_MAX_ENTITIES];
@@ -162,6 +164,14 @@ static void FindTriggers( triggers_t *t ) {
 		}
 		if ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_STOP_TIMER ) ) {
 			t->goals[GS_ROUTE_FINISH][ t->numGoals[GS_ROUTE_FINISH]++ ] = i;
+		}
+		// each checkpoint is its own target: the triggers that fire it
+		for ( int k = 0; e->type == GE_TRIGGER_MULTIPLE && k < e->numTargets; k++ ) {
+			const gsEnt_t *cp = &gs_world.ents[ e->targets[k] ];
+			if ( cp->type == GE_TARGET_CHECKPOINT ) {
+				int target = GS_ROUTE_CHECKPOINT0 + cp->slot;
+				t->goals[target][ t->numGoals[target]++ ] = i;
+			}
 		}
 		if ( e->type == GE_TRIGGER_HURT || ( e->type == GE_TRIGGER_MULTIPLE && TriggerFires( e, GE_TARGET_KILL ) ) ) {
 			t->deadly[ t->numDeadly++ ] = i;
@@ -332,9 +342,20 @@ int gs_route_build( float cell ) {
 		route.size[i] = (int)ceilf( ( maxs[i] - mins[i] ) / route.cell ) + 1;
 	}
 	int numCells = route.size[0] * route.size[1] * route.size[2];
-	for ( int k = 0; k < GS_ROUTE_TARGETS; k++ ) {
+
+	// targets: start, finish, then one per checkpoint
+	route.numTargets = GS_ROUTE_CHECKPOINT0 + gs_world.numCheckpoints;
+	for ( int k = 0; k < GS_ROUTE_MAX_TARGETS; k++ ) {
+		route.targetEntity[k] = -1;
+	}
+	for ( int i = 0; i < gs_world.numEnts; i++ ) {
+		if ( gs_world.ents[i].type == GE_TARGET_CHECKPOINT ) {
+			route.targetEntity[ GS_ROUTE_CHECKPOINT0 + gs_world.ents[i].slot ] = i;
+		}
+	}
+	for ( int k = 0; k < GS_ROUTE_MAX_TARGETS; k++ ) {
 		free( route.dist[k] );
-		route.dist[k] = malloc( numCells * sizeof( float ) );
+		route.dist[k] = k < route.numTargets ? malloc( numCells * sizeof( float ) ) : NULL;
 	}
 	free( route.air );
 	route.air = calloc( numCells, 1 );
@@ -374,7 +395,7 @@ int gs_route_build( float cell ) {
 		}
 	}
 
-	for ( int k = GS_ROUTE_TARGETS - 1; k >= 0; k-- ) {
+	for ( int k = route.numTargets - 1; k >= 0; k-- ) {
 		if ( k ) {
 			memcpy( route.dist[k], open, numCells * sizeof( float ) );
 		}
@@ -383,24 +404,32 @@ int gs_route_build( float cell ) {
 
 	free( t.isTeleportDest );
 
-	int numReached[GS_ROUTE_TARGETS] = { 0 };
+	int numReached[2] = { 0 };
 	for ( int c = 0; c < numCells; c++ ) {
-		for ( int k = 0; k < GS_ROUTE_TARGETS; k++ ) {
-			numReached[k] += route.dist[k][c] >= 0;
-		}
+		numReached[0] += route.dist[GS_ROUTE_START][c] >= 0;
+		numReached[1] += route.dist[GS_ROUTE_FINISH][c] >= 0;
 	}
-	Com_Printf( "route: %ix%ix%i cells of %.0f units; %i reach the start zone, %i the finish "
-				"(%i deadly / %i teleport triggers)\n", route.size[0], route.size[1], route.size[2],
-				route.cell, numReached[GS_ROUTE_START], numReached[GS_ROUTE_FINISH], t.numDeadly, t.numTeleports );
+	Com_Printf( "route: %ix%ix%i cells of %.0f units; %i reach the start zone, %i the finish; "
+				"%i checkpoints (%i deadly / %i teleport triggers)\n", route.size[0], route.size[1],
+				route.size[2], route.cell, numReached[0], numReached[1], gs_world.numCheckpoints,
+				t.numDeadly, t.numTeleports );
 	route.built = 1;
 	return 0;
+}
+
+int gs_route_num_targets( void ) {
+	return route.built ? route.numTargets : 0;
+}
+
+int gs_route_target_entity( int target ) {
+	return route.built && target >= 0 && target < route.numTargets ? route.targetEntity[target] : -1;
 }
 
 // ---------------------------------------------------------------------------
 // lookups
 
 float gs_route_distance( int target, const float pos[3] ) {
-	if ( !route.built || target < 0 || target >= GS_ROUTE_TARGETS ) {
+	if ( !route.built || target < 0 || target >= route.numTargets ) {
 		return -1;
 	}
 	const float *dist = route.dist[target];
@@ -443,7 +472,7 @@ float gs_route_distance( int target, const float pos[3] ) {
 }
 
 int gs_route_ahead( int target, const float pos[3], float ahead, float out[3] ) {
-	if ( !route.built || target < 0 || target >= GS_ROUTE_TARGETS ) {
+	if ( !route.built || target < 0 || target >= route.numTargets ) {
 		return -1;
 	}
 	const float *dist = route.dist[target];

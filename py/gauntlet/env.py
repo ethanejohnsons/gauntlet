@@ -1,21 +1,23 @@
 """The training environment: many players racing one map in the sim at once.
 
 The AI makes one decision every FRAMES_PER_ACTION frames (4 frames = 32 ms) for
-every player at the same time. A decision is four choices, like a keyboard and a
-mouse that only turns left and right:
+every player at the same time. A decision is six choices, like a keyboard and mouse:
 
     forward:  back / none / forward
     side:     left / none / right
     jump:     no / yes (VQ3 has no auto-hop, so jump must be let go before the next one)
     turn:     one of TURN_RATES, degrees per frame, held for the whole decision
+    fire:     no / yes (only the rocket launcher fires in the sim; it's held whenever owned)
+    aim:      one of PITCHES, the up/down view angle for the decision (down is positive)
 
-Rewards come from the route (sim/src/route.c). A run has two legs: to the start
-zone (which starts the timer), then to the finish. On each leg, getting closer earns
-points; starting the timer and finishing earn a bonus. Dying ends the episode and
-takes back every point earned in it, so an episode is worth how far the player got
-if it survived, and nothing if it died; no map can make "rush ahead, then die" pay.
-Episodes also end after max_seconds. Every frame's input is kept, so any episode can be exported as a .run
-file and replayed in the real game.
+Rewards come from the route (sim/src/route.c). A run is a list of legs, one per zone:
+the start zone (which starts the timer), each checkpoint (nearest next, along the
+route), then the finish. On each leg, getting closer earns points; reaching a zone
+earns a small bonus and finishing a big one. Dying ends the episode and takes back
+every point earned in it, so an episode is worth how far the player got if it
+survived, and nothing if it died: no map can make "rush ahead, then die" pay.
+Episodes also end after max_seconds. Every frame's input is kept, so any episode can
+be exported as a .run file and replayed in the real game.
 """
 
 import ctypes as C
@@ -27,10 +29,11 @@ from . import bots, runfile, sim
 
 FRAMES_PER_ACTION = 4
 TURN_RATES = np.array([-6, -3, -1.5, -0.75, -0.25, 0, 0.25, 0.75, 1.5, 3, 6], dtype=np.float32)
-ACTION_SIZES = (3, 3, 2, len(TURN_RATES))   # forward, side, jump, turn
+PITCHES = np.array([-15, 0, 20, 45, 70, 89], dtype=np.float32)
+ACTION_SIZES = (3, 3, 2, len(TURN_RATES), 2, len(PITCHES))   # forward, side, jump, turn, fire, aim
 SETTLE_FRAMES = 125                           # standing still after spawning, as in .run files
 
-OBS_SIZE = 46                                 # GS_OBS_SIZE in gauntlet.h
+OBS_SIZE = 52                                 # GS_OBS_SIZE in gauntlet.h
 
 # numpy views of gs_cmd_t and gs_state_t (sim/include/gauntlet.h)
 CMD_DTYPE = np.dtype([("angles", np.int32, 3), ("forward", np.int8), ("right", np.int8),
@@ -41,15 +44,16 @@ STATE_DTYPE = np.dtype([(name, np.float32 if t._type_ is C.c_float else np.int32
 assert CMD_DTYPE.itemsize == C.sizeof(sim.Cmd) and STATE_DTYPE.itemsize == C.sizeof(sim.State)
 
 # rewards
-PROGRESS_SCALE = 1 / 100    # per unit closer to the current target
-START_BONUS = 0.5           # the timer started. Keep it below the death penalty: on maps
-                            # whose start line hangs over a pit, a bigger bonus pays for
-                            # jumping in, starting the timer and dying.
+PROGRESS_SCALE = 1 / 100    # per unit closer to the current zone
+ZONE_BONUS = 0.5            # the start zone or a checkpoint reached. Keep it below the death
+                            # penalty: on maps whose start line hangs over a pit, a bigger
+                            # bonus pays for jumping in, starting the timer and dying.
 FINISH_BONUS = 10.0
 DEATH_PENALTY = -1.0        # on top of losing the episode's points so far
 # No per-decision time penalty: summed over an episode it would outweigh the death
 # penalty and teach the AI to die early. Discounting (gamma in train/ppo.py) already
 # makes sooner rewards worth more, which is what rewards speed.
+CHECKPOINT_RADIUS = 8       # route distance at which a checkpoint zone counts as reached
 
 
 def _ptr(array):
@@ -87,22 +91,22 @@ class VecEnv:
         self.snapshot = C.create_string_buffer(L.gs_env_snapshot_size())
         L.gs_env_save(start._env, self.snapshot)
 
-        # Route lengths, for reporting progress as a fraction of the whole run:
-        # spawn -> start zone, then start zone -> finish (measured from the middle of
-        # the start trigger).
-        self.leg1 = sim.route_distance(tuple(s.origin), sim.ROUTE_START)
-        zone = self._start_zone_center()
-        self.leg2 = sim.route_distance(zone, sim.ROUTE_FINISH) if zone else -1
-        if self.leg1 < 0 or self.leg2 < 0:
+        # The legs of a run, and how long each is along the route (for reporting
+        # progress as a fraction of the whole run).
+        self.legs = sim.route_legs(tuple(s.origin))
+        if any(length < 0 for _, length in self.legs):
             raise RuntimeError(f"{mapname}: no route from the spawn through the start zone to the finish")
-        self.start_route = self.leg1 + self.leg2
+        self.leg_targets = np.array([t for t, _ in self.legs])
+        self.leg_starts = np.cumsum([0] + [length for _, length in self.legs])   # route done before each leg
+        self.start_route = float(self.leg_starts[-1])
 
         self.envs = [L.gs_env_new() for _ in range(self.n)]
         self.env_ptrs = (C.c_void_p * self.n)(*self.envs)
         self.cmds = np.zeros(self.n, CMD_DTYPE)
         self.obs = np.zeros((self.n, OBS_SIZE), np.float32)
         self.states = np.zeros(self.n, STATE_DTYPE)
-        self.route = np.zeros(self.n, np.float32)
+        self.route = np.zeros(self.n, np.float32)       # distance to the current leg's zone
+        self.leg = np.zeros(self.n, np.int64)
         # every frame's input since each env's episode started, for exporting runs
         self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 8), np.int32)
         self.frames = np.zeros(self.n, np.int64)
@@ -110,28 +114,23 @@ class VecEnv:
 
     # -- helpers ---------------------------------------------------------------
 
-    @staticmethod
-    def _start_zone_center():
-        """The middle of the first trigger that starts the timer."""
-        ents = sim.entities()
-        starts = {e["targetname"] for e in ents if e["classname"] == "target_startTimer"}
-        for e in ents:
-            if e["classname"] == "trigger_multiple" and e["target"] in starts:
-                return tuple((a + b) / 2 for a, b in zip(e["absmin"], e["absmax"]))
-        return None
-
-    def _progress(self, route, timer_state):
+    def _progress(self, route, leg):
         """How far along the whole run each player is: 0 at the spawn, 1 at the finish."""
-        done_so_far = np.where(timer_state == 0, self.leg1 - route, self.leg1 + self.leg2 - route)
+        done_so_far = self.leg_starts[leg + 1] - route
         return np.clip(done_so_far / self.start_route, 0, 1)
 
     def _observe(self):
         self.lib.gs_observe_batch(self.env_ptrs, self.n, self.threads, _ptr(self.obs),
                                   _ptr(self.states), _ptr(self.route))
 
+    def _set_leg(self, i, leg):
+        self.leg[i] = leg
+        self.lib.gs_env_set_route_target(self.envs[i], int(self.leg_targets[leg]))
+
     def _restart(self, indices):
         for i in indices:
             self.lib.gs_env_restore(self.envs[i], self.snapshot)
+            self._set_leg(i, 0)
         self.frames[indices] = 0
         self.returns[indices] = 0
 
@@ -143,29 +142,36 @@ class VecEnv:
     # -- stepping --------------------------------------------------------------
 
     def step(self, actions):
-        """actions: (n, 4) ints, one row per player. Returns obs, reward, done, info."""
+        """actions: (n, 6) ints, one row per player. Returns obs, reward, done, info."""
         forward = (actions[:, 0] - 1) * 127
         side = (actions[:, 1] - 1) * 127
         jump = actions[:, 2] * 127
         turn = TURN_RATES[actions[:, 3]]
+        fire = actions[:, 4] * sim.BUTTON_ATTACK
+        pitch = PITCHES[actions[:, 5]]
 
         prev_route = self.route.copy()
         prev_timer = self.states["timer_state"].copy()
         yaw = self.states["viewangles"][:, 1].astype(np.float64)
-        delta = self.states["delta_angles"][:, 1]
+        delta = self.states["delta_angles"]
+        has_rl = (self.states["weapons"] & (1 << sim.WP_ROCKET_LAUNCHER)) != 0
         self.cmds["forward"] = forward
         self.cmds["right"] = side
         self.cmds["up"] = jump
-        self.cmds["angles"][:, 0] = (-self.states["delta_angles"][:, 0]) & 65535   # level view
+        self.cmds["buttons"] = fire
+        self.cmds["weapon"] = np.where(has_rl, sim.WP_ROCKET_LAUNCHER, 0)
+        self.cmds["angles"][:, 0] = ((pitch * 65536 / 360).astype(np.int64) - delta[:, 0]) & 65535
         everyone = np.arange(self.n)
         for _ in range(FRAMES_PER_ACTION):
             yaw += turn
-            self.cmds["angles"][:, 1] = ((yaw * 65536 / 360).astype(np.int64) - delta) & 65535
+            self.cmds["angles"][:, 1] = ((yaw * 65536 / 360).astype(np.int64) - delta[:, 1]) & 65535
             # remember this frame's input (episodes end before the history is full)
             self.history[everyone, self.frames, 0:3] = self.cmds["angles"]
             self.history[everyone, self.frames, 3] = forward
             self.history[everyone, self.frames, 4] = side
             self.history[everyone, self.frames, 5] = jump
+            self.history[everyone, self.frames, 6] = fire
+            self.history[everyone, self.frames, 7] = self.cmds["weapon"]
             self.frames += 1
             self.lib.gs_step_batch(self.env_ptrs, _ptr(self.cmds), self.n, self.threads)
         self._observe()
@@ -176,17 +182,30 @@ class VecEnv:
         # half inside the floor), keep the last known distance: no progress, no penalty.
         self.route = np.where(self.route < 0, prev_route, self.route)
         finished = timer == 2
-        started = (prev_timer == 0) & (timer != 0)
         timeout = self.frames >= self.max_frames
-        # progress on the current leg; none on the step that switches legs (the two
-        # distances are to different targets) or dies
-        progress = np.where(dead | started | finished, 0, prev_route - self.route)
+
+        # reaching the current leg's zone: the start zone starts the timer, a
+        # checkpoint zone is reached when the route to it is (about) zero
+        target = self.leg_targets[self.leg]
+        on_last_leg = self.leg == len(self.legs) - 1
+        reached = np.where(target == sim.ROUTE_START, (prev_timer == 0) & (timer != 0),
+                           (target >= sim.ROUTE_CHECKPOINT0) & (self.route <= CHECKPOINT_RADIUS))
+        reached &= ~on_last_leg & ~dead
+
+        # progress on the current leg; none on a step that reaches a zone (the next
+        # distance is to a different zone), finishes or dies
+        progress = np.where(dead | reached | finished, 0, prev_route - self.route)
         reward = progress * PROGRESS_SCALE
-        reward += np.where(started, START_BONUS, 0)
+        reward += np.where(reached, ZONE_BONUS, 0)
         reward += np.where(finished, FINISH_BONUS, 0)
         reward += np.where(dead, DEATH_PENALTY - self.returns - reward, 0)
         self.returns += reward
         done = dead | finished | timeout
+
+        # next leg for whoever reached their zone
+        for i in np.nonzero(reached & ~done)[0]:
+            self._set_leg(i, self.leg[i] + 1)
+            self.route[i] = sim.route_distance(tuple(self.states["origin"][i]), int(self.leg_targets[self.leg[i]]))
 
         info = {}
         if done.any():
@@ -201,7 +220,7 @@ class VecEnv:
                 # how far along the run each got (for dead players, where they were last alive)
                 "progress": np.where(finished[ended], 1.0,
                                      self._progress(np.where(dead, prev_route, self.route)[ended],
-                                                    np.where(dead, prev_timer, timer)[ended])),
+                                                    self.leg[ended])),
             }
             info["runs"] = {i: self.history[i, :self.frames[i]].copy() for i in ended}
             self._restart(ended)

@@ -614,6 +614,7 @@ void G_SpawnPlayer( gs_env_t *env ) {
 	playerState_t *ps = &env->ps;
 
 	memset( env, 0, sizeof( *env ) );
+	env->routeTarget = -1;
 
 	VectorClear( spawn_origin );
 	VectorClear( spawn_angles );

@@ -82,6 +82,9 @@ def lib():
         L.gs_route_distance.argtypes = [C.c_int, Vec3]
         L.gs_route_distance.restype = C.c_float
         L.gs_route_ahead.argtypes = [C.c_int, Vec3, C.c_float, Vec3]
+        L.gs_route_num_targets.restype = C.c_int
+        L.gs_route_target_entity.argtypes = [C.c_int]
+        L.gs_env_set_route_target.argtypes = [C.c_void_p, C.c_int]
         _lib = L
     return _lib
 
@@ -115,7 +118,7 @@ def trace(start, end):
     return frac, (hit[0], hit[1], hit[2])
 
 
-ROUTE_START, ROUTE_FINISH = 0, 1   # route targets: the start zone, the finish
+ROUTE_START, ROUTE_FINISH, ROUTE_CHECKPOINT0 = 0, 1, 2   # route targets (then one per checkpoint)
 
 
 def build_route(cell=0):
@@ -135,6 +138,41 @@ def route_ahead(pos, ahead, target=ROUTE_FINISH):
     """The point about `ahead` units further along the route to the target, or None."""
     out = Vec3()
     return tuple(out) if lib().gs_route_ahead(target, Vec3(*pos), ahead, out) == 0 else None
+
+
+def zone_center(target):
+    """The middle of the first trigger zone of a route target (start, finish or a checkpoint)."""
+    ents = entities()
+    if target == ROUTE_START or target == ROUTE_FINISH:
+        kind = "target_startTimer" if target == ROUTE_START else "target_stopTimer"
+        names = {e["targetname"] for e in ents if e["classname"] == kind}
+    else:
+        names = {ents[lib().gs_route_target_entity(target)]["targetname"]}
+    for e in ents:
+        if e["classname"] == "trigger_multiple" and e["target"] in names:
+            return tuple((a + b) / 2 for a, b in zip(e["absmin"], e["absmax"]))
+    return None
+
+
+def route_legs(spawn):
+    """The order of a run: the start zone, then the checkpoints (each time the nearest
+    unvisited one along the route), then the finish. Returns [(target, length)], where
+    length is the route distance from the previous zone (the spawn for the first)."""
+    L = lib()
+    legs = [(ROUTE_START, route_distance(spawn, ROUTE_START))]
+    here = zone_center(ROUTE_START)
+    remaining = list(range(ROUTE_CHECKPOINT0, L.gs_route_num_targets()))
+    while remaining:
+        dists = [(route_distance(here, k), k) for k in remaining]
+        dists = [(d, k) for d, k in dists if d >= 0]
+        if not dists:
+            break   # the rest aren't reachable from here; skip them
+        d, k = min(dists)
+        legs.append((k, d))
+        remaining.remove(k)
+        here = zone_center(k)
+    legs.append((ROUTE_FINISH, route_distance(here, ROUTE_FINISH)))
+    return legs
 
 
 class Env:

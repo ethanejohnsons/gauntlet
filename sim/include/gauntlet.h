@@ -112,22 +112,25 @@ float		gs_trace( const float start[3], const float end[3], const float mins[3],
 					  const float maxs[3], float endpos[3] );
 void		gs_set_verbose( int level );		// 1: print Q3's messages, 2: also debug ones
 
-// --- the route: distance to the start zone and to the finish -----------------
+// --- the route: distance to the start zone, the checkpoints and the finish ----
 //
 // A grid over the map holding, for every place a player fits, the length of the
-// shortest path through open space to a target: the start zone (which starts the
-// timer) or the finish. Gravity is ignored (the path floats over gaps) and
-// teleporters count as free jumps. Used for rewards ("how much closer did I get?")
-// and to show the way ahead.
+// shortest path through open space to a target zone: the start zone (which starts
+// the timer), each checkpoint, and the finish. Climbing and crossing gaps cost extra
+// (see sim/src/route.c); teleporters count as free jumps. Used for rewards ("how much
+// closer did I get?") and to show the way ahead.
 
-#define GS_ROUTE_START		0
-#define GS_ROUTE_FINISH		1
-#define GS_ROUTE_TARGETS	2
+#define GS_ROUTE_START			0
+#define GS_ROUTE_FINISH			1
+#define GS_ROUTE_CHECKPOINT0	2	// then one target per checkpoint, in map order
 
 // Build it for the loaded map; `cell` is the grid spacing in units (<= 0: 16). Takes
 // a few seconds. Returns 0, or -1 if the map has no start or finish (see gs_last_error).
 int			gs_route_build( float cell );
-// Distance from pos to the target (GS_ROUTE_*), or -1 if pos isn't connected to it.
+int			gs_route_num_targets( void );
+// The map entity (gs_entity index) of a checkpoint target, or -1 for start and finish.
+int			gs_route_target_entity( int target );
+// Distance from pos to the target, or -1 if pos isn't connected to it.
 float		gs_route_distance( int target, const float pos[3] );
 // The point about `ahead` units further along the route to the target. Returns 0, or -1.
 int			gs_route_ahead( int target, const float pos[3], float ahead, float out[3] );
@@ -139,6 +142,10 @@ void		gs_env_free( gs_env_t *env );
 void		gs_env_spawn( gs_env_t *env );		// (re)start at the map's spawn point
 void		gs_env_step( gs_env_t *env, const gs_cmd_t *cmd );	// one 8 ms frame
 void		gs_env_get_state( const gs_env_t *env, gs_state_t *out );
+// Which route target this player is heading for, for its observations and
+// gs_observe_batch's route_dist. -1 (the default): the start zone until the timer
+// runs, then the finish.
+void		gs_env_set_route_target( gs_env_t *env, int target );
 // Put the player somewhere, like DeFRaG's placeplayer: origin, velocity and view yaw.
 // The timer, items and everything else are kept.
 void		gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw );
@@ -170,14 +177,19 @@ void		gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads 
 //   31     feeler straight down,  32  straight up
 //   33-44  the route ahead: points 64, 128, 256 and 512 units further along the route,
 //          relative to the player (x, y, z) / 512; zeros if there is no route here.
-//          The route leads to the start zone until the timer runs, then to the finish.
+//          The route leads to the env's route target (gs_env_set_route_target).
 //   45     timer running (0 or 1)
-#define GS_OBS_SIZE			46
+//   46     view pitch / 90 (positive: looking down)
+//   47     health / 100,  48  armor / 100
+//   49     rockets / 10 (capped at 1)
+//   50     rocket launcher in hand and ready to fire (0 or 1)
+//   51     time until the weapon can fire again, in seconds
+#define GS_OBS_SIZE			52
 #define GS_OBS_RAY_LENGTH	1024
 
 // Fill obs[i * GS_OBS_SIZE ...] for envs[i], and optionally states[i] (as
 // gs_env_get_state) and route_dist[i] (gs_route_distance from the player's origin to
-// the current target: the start zone until the timer runs, then the finish).
+// its route target).
 // states and route_dist may be NULL.
 void		gs_observe_batch( gs_env_t **envs, int n, int nthreads, float *obs,
 							  gs_state_t *states, float *route_dist );

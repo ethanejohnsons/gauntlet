@@ -1,5 +1,6 @@
 // observe.c -- what a player senses, for training: its own motion, feelers (rays)
-// around it, the route ahead and the timer. The layout is documented in gauntlet.h.
+// around it, the route ahead, the timer, and its weapon and health. The layout is
+// documented in gauntlet.h.
 
 #include "sim_local.h"
 
@@ -28,8 +29,11 @@ static float Feeler( const vec3_t start, const vec3_t dir ) {
 	return tr.fraction;
 }
 
-// which route leg the player is on
+// which route target the player is heading for
 static int RouteTarget( const gs_env_t *env ) {
+	if ( env->routeTarget >= 0 ) {
+		return env->routeTarget;
+	}
 	return env->timerState == GS_TIMER_IDLE ? GS_ROUTE_START : GS_ROUTE_FINISH;
 }
 
@@ -75,6 +79,14 @@ static void Observe( const gs_env_t *env, float *o ) {
 		k += 3;
 	}
 	o[k++] = env->timerState == GS_TIMER_RUNNING;
+
+	// weapons and health
+	o[k++] = AngleNormalize180( ps->viewangles[PITCH] ) / 90;
+	o[k++] = ps->stats[STAT_HEALTH] / 100.0f;
+	o[k++] = ps->stats[STAT_ARMOR] / 100.0f;
+	o[k++] = ps->ammo[WP_ROCKET_LAUNCHER] >= 10 ? 1 : ps->ammo[WP_ROCKET_LAUNCHER] / 10.0f;
+	o[k++] = ps->weapon == WP_ROCKET_LAUNCHER && ps->weaponstate == WEAPON_READY && ps->weaponTime <= 0;
+	o[k++] = ps->weaponTime > 0 ? ps->weaponTime / 1000.0f : 0;
 }
 
 typedef struct {

@@ -2,7 +2,7 @@
 """Draw the network's thinking onto a rendered run, frame by frame.
 
 Takes the video from tools/render_run.sh and the thinking from tools/play_agent.py
-(or tools/think.py) and writes a new video with a panel on the right:
+and writes a new video with a panel on the right:
 
   - the network: inputs, two hidden layers (the 24 busiest neurons of each) and the
     outputs, lit by their real activations, with the strongest real connections
@@ -41,7 +41,8 @@ TEXT, DIM = (201, 199, 191), (123, 121, 115)
 AMBER, GREEN, RED = (232, 176, 74), (127, 209, 139), (217, 118, 95)
 
 CHOICES = [("FWD", ["BACK", "-", "FWD"]), ("SIDE", ["LEFT", "-", "RIGHT"]), ("JUMP", ["NO", "YES"]),
-           ("TURN", [f"{r:+g}" for r in genv.TURN_RATES])]
+           ("TURN", [f"{r:+g}" for r in genv.TURN_RATES]), ("FIRE", ["NO", "YES"]),
+           ("AIM", [f"{p:g}" for p in genv.PITCHES])]
 SHOWN = 24      # hidden neurons drawn per layer
 
 
@@ -95,14 +96,14 @@ class Panel:
         sx, sy = self.w / 1280, self.h / 720
         self.x0, self.y0 = int(948 * sx), int(150 * sy)
         self.pw, self.ph = int(324 * sx), int(500 * sy)
-        top, bottom = self.y0 + 14, self.y0 + int(340 * sy)
+        top, bottom = self.y0 + 14, self.y0 + int(285 * sy)
         cols = [self.x0 + self.pw * f for f in (0.08, 0.37, 0.66, 0.92)]
         self.inputs = [(cols[0], top + i * (bottom - top) / 45) for i in range(46)]
         self.h1 = [(cols[1], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
         self.h2 = [(cols[2], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
         # outputs: one column, a small gap between the four choices
         self.outputs, y = [], top
-        step = (bottom - top) / 21.5
+        step = (bottom - top) / ( sum(len(n) for _, n in CHOICES) + len(CHOICES) / 2 )
         for _, names in CHOICES:
             for _ in names:
                 self.outputs.append((cols[3], y))
@@ -196,7 +197,7 @@ class Panel:
         # the keys it's holding
         y += gh + 10
         keys = [("W", action[0] == 2), ("A", action[1] == 0), ("S", action[0] == 0), ("D", action[1] == 2),
-                ("JUMP", action[2] == 1)]
+                ("JUMP", action[2] == 1), ("FIRE", action[4] == 1)]
         kx = self.x0 + 10
         for k, on in keys:
             kw = 9 * len(k) + 12
@@ -209,7 +210,7 @@ class Panel:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("video", help="mp4 from tools/render_run.sh")
-    ap.add_argument("think", help=".think.npz from tools/play_agent.py or tools/think.py")
+    ap.add_argument("think", help=".think.npz from tools/play_agent.py")
     ap.add_argument("agent", help="the agent.pt that made the run (for its connection weights)")
     ap.add_argument("--label", default="", help="text after AI PLAYING in the corner tag")
     ap.add_argument("--start", type=float, default=0, help="start the output this many seconds in")

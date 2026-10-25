@@ -165,13 +165,6 @@ training in a browser:
 .venv/bin/tensorboard --logdir runs/
 ```
 
-To record what the network was "thinking" during a run (inputs, hidden layers, choice
-probabilities and value, per decision; the data the stream overlay will draw):
-
-```sh
-.venv/bin/python tools/think.py runs/<map>/<name>/best_progress.run runs/<map>/<name>/agent.pt
-```
-
 To look at a saved run, draw it on the map or render it in the real game:
 
 ```sh

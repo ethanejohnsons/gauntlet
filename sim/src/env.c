@@ -18,6 +18,10 @@ void gs_env_spawn( gs_env_t *env ) {
 	G_SpawnPlayer( env );
 }
 
+void gs_env_set_route_target( gs_env_t *env, int target ) {
+	env->routeTarget = target;
+}
+
 void gs_env_step( gs_env_t *env, const gs_cmd_t *in ) {
 	usercmd_t cmd;
 	memset( &cmd, 0, sizeof( cmd ) );

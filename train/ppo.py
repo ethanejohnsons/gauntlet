@@ -92,6 +92,7 @@ def parse_args():
     ap.add_argument("--clip", type=float, default=0.2, help="how far one update may move the policy")
     ap.add_argument("--entropy", type=float, default=0.01, help="bonus for staying curious")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--init", help="start from this agent.pt instead of a fresh network")
     return ap.parse_args()
 
 
@@ -106,6 +107,8 @@ def main():
 
     env = VecEnv(args.map, args.envs, max_seconds=args.max_seconds, threads=args.threads)
     agent = Agent().to(device)
+    if args.init:
+        agent.load_state_dict(torch.load(args.init, map_location=device))
     optimizer = torch.optim.Adam(agent.parameters(), lr=args.lr, eps=1e-5)
     print(f"{args.map}: route from spawn to finish is {env.start_route:.0f} units; "
           f"{args.envs} players on {device}; writing to {out.relative_to(ROOT)}")

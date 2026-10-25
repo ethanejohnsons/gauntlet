@@ -14,8 +14,10 @@ Rewards come from the route (sim/src/route.c). A run is a list of legs, one per 
 the start zone (which starts the timer), each checkpoint (nearest next, along the
 route), then the finish. On each leg, getting closer earns points; reaching a zone
 earns a small bonus and finishing a big one. Dying ends the episode and takes back
-every point earned in it, so an episode is worth how far the player got if it
-survived, and nothing if it died: no map can make "rush ahead, then die" pay.
+the points earned on the current leg (as if respawning at the last zone reached):
+"rush ahead, then die" never pays, but earlier legs are safe, so trying a risky jump
+isn't a gamble with the whole run. (Taking back the whole episode's points made the
+AI stand still in front of the first dangerous jump rather than risk it.)
 Episodes also end after max_seconds. Every frame's input is kept, so any episode can
 be exported as a .run file and replayed in the real game.
 """
@@ -49,7 +51,7 @@ ZONE_BONUS = 0.5            # the start zone or a checkpoint reached. Keep it be
                             # penalty: on maps whose start line hangs over a pit, a bigger
                             # bonus pays for jumping in, starting the timer and dying.
 FINISH_BONUS = 10.0
-DEATH_PENALTY = -1.0        # on top of losing the episode's points so far
+DEATH_PENALTY = -1.0        # on top of losing the current leg's points
 # No per-decision time penalty: summed over an episode it would outweigh the death
 # penalty and teach the AI to die early. Discounting (gamma in train/ppo.py) already
 # makes sooner rewards worth more, which is what rewards speed.
@@ -111,6 +113,7 @@ class VecEnv:
         self.history = np.zeros((self.n, self.max_frames + FRAMES_PER_ACTION, 8), np.int32)
         self.frames = np.zeros(self.n, np.int64)
         self.returns = np.zeros(self.n, np.float32)    # reward so far this episode
+        self.leg_returns = np.zeros(self.n, np.float32)  # reward so far on the current leg
 
     # -- helpers ---------------------------------------------------------------
 
@@ -133,6 +136,7 @@ class VecEnv:
             self._set_leg(i, 0)
         self.frames[indices] = 0
         self.returns[indices] = 0
+        self.leg_returns[indices] = 0
 
     def reset(self):
         self._restart(np.arange(self.n))
@@ -198,8 +202,9 @@ class VecEnv:
         reward = progress * PROGRESS_SCALE
         reward += np.where(reached, ZONE_BONUS, 0)
         reward += np.where(finished, FINISH_BONUS, 0)
-        reward += np.where(dead, DEATH_PENALTY - self.returns - reward, 0)
+        reward += np.where(dead, DEATH_PENALTY - self.leg_returns - reward, 0)
         self.returns += reward
+        self.leg_returns = np.where(reached, 0, self.leg_returns + reward)   # a new leg starts from zero
         done = dead | finished | timeout
 
         # next leg for whoever reached their zone

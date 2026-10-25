@@ -164,3 +164,18 @@ To look at a saved run, draw it on the map or render it in the real game:
 python3 tools/topdown.py vanilla_01 --route --run runs/vanilla_01/<name>/best_progress.run -o build/topdown/ai.png
 tools/render_run.sh runs/vanilla_01/<name>/best_progress.run
 ```
+
+## Videos with the network on screen
+
+Let a trained network play, render its run in the real game, then draw its thinking
+on top (the panel uses the int10h.org "MxPlus IBM VGA" font, CC BY-SA 4.0: credit it
+where the video is posted):
+
+```sh
+.venv/bin/python tools/play_agent.py tatmt-s2 runs/tatmt-s2/<name>/agent.pt -o build/runs/tatmt-s2_ai --greedy
+tools/render_run.sh build/runs/tatmt-s2_ai.run tatmt-s2_ai
+.venv/bin/python tools/overlay.py build/video/tatmt-s2_ai.mp4 build/runs/tatmt-s2_ai.think.npz \
+    runs/tatmt-s2/<name>/agent.pt --label "25 MIN OF TRAINING" --end 9
+```
+
+The result is `build/video/tatmt-s2_ai_overlay.mp4`.

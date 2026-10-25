@@ -31,7 +31,7 @@ else
 	python3 "$ROOT/tools/export_run.py" "$MAP" --bot "${2:-strafe}" --frames "${3:-400}" \
 		-o "$HOME_Q3/defrag/runs/$NAME.run" | head -2
 fi
-rm -f "$HOME_Q3/defrag/gs_replay.log" "$HOME_Q3/defrag/demos/gs_$NAME.dm_68" "$HOME_Q3/defrag/videos/gs_$NAME.mp4"
+rm -f "$HOME_Q3/defrag/gs_replay.log" "$HOME_Q3/defrag/gs_video.log" "$HOME_Q3/defrag/demos/gs_$NAME.dm_68" "$HOME_Q3/defrag/videos/gs_$NAME.mp4"
 
 # frames of the replay at 125 fps, plus a margin; `wait` counts client frames
 REPLAY_FRAMES=$(sed -n 's/^frames //p' "$HOME_Q3/defrag/runs/$NAME.run")
@@ -54,4 +54,7 @@ python3 "$ROOT/tools/compare_run.py" "$HOME_Q3/defrag/runs/$NAME.run" "$HOME_Q3/
 echo "rendering the demo..."
 engine +set cl_aviFrameRate 60 +set nextdemo quit +demo "gs_$NAME" +wait 3 +video-pipe "gs_$NAME"
 cp "$HOME_Q3/defrag/videos/gs_$NAME.mp4" "$ROOT/build/video/$NAME.mp4"
+# timing logs, for drawing overlays (tools/overlay.py)
+cp "$HOME_Q3/defrag/gs_video.log" "$ROOT/build/video/$NAME.video.log"
+cp "$HOME_Q3/defrag/gs_replay.log" "$ROOT/build/video/$NAME.replay.log"
 echo "video: build/video/$NAME.mp4"

@@ -76,6 +76,7 @@ def lib():
         L.gs_env_step.argtypes = [C.c_void_p, C.POINTER(Cmd)]
         L.gs_env_get_state.argtypes = [C.c_void_p, C.POINTER(State)]
         L.gs_env_place.argtypes = [C.c_void_p, Vec3, Vec3, C.c_float]
+        L.gs_env_set_ammo.argtypes = [C.c_void_p, C.c_int, C.c_int]
         L.gs_trace.argtypes = [Vec3, Vec3, C.c_void_p, C.c_void_p, Vec3]
         L.gs_trace.restype = C.c_float
         L.gs_route_build.argtypes = [C.c_float]

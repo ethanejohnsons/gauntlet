@@ -30,17 +30,26 @@ Restart points (as in Go-Explore): the env remembers a snapshot of the places
 players reach, one per cell (a leg, a slice of the run's progress, and what the
 player carries: the rocket launcher, rockets). With restart_fraction > 0, that share
 of episodes starts from a remembered cell instead of the spawn, cells few episodes
-have reached first. This matters on maps where a mistake shows only much later: on tatmt-s2 the
-map hands out one rocket for one rocket jump, and a player who fires it on the way
-there is stuck 20 seconds later. Restarting near the jump with the rocket still in
+have reached first. This matters on maps where a mistake shows only much later: on
+tatmt-s2 the map hands out one rocket, which the last jump needs, and a player who
+fires it on the way can't finish. Restarting near the jump with the rocket still in
 hand lets the AI learn the jump, and then that the rocket is worth keeping. A
 snapshot keeps the inputs that led to it, so a restarted episode is still a whole
 run from the spawn, timer included, and exports like any other.
 
 Scouts help find such places: the last `scouts` players never fire (they keep their
-ammo for later) and always start at the spawn. They aren't trained on (train/ppo.py
-leaves them out) and their visits don't count, so a cell only scouts have reached,
-like "at the rocket jump, rocket still in hand", is where restarts go first.
+ammo for later). They restart too, but only from cells where they still carry
+rockets, so they push on from the furthest such cell, step by step. They aren't
+trained on (train/ppo.py leaves them out) and their visits count separately, so a
+cell only scouts have reached, like "at the rocket jump, rocket still in hand", is
+where the learners' restarts go first.
+
+Ammo restarts go further: when a learner restarts from a place it reached after
+firing, AMMO_RESTARTS of the time it gets back the rockets it had picked up, as if it
+had kept them. That lets the AI practise a jump that needs a rocket at the end of a
+map before it has learned to keep one that long. Such an episode never happened in
+a real run, so it is marked synthetic: it isn't exported, doesn't count for the
+best runs or averages, and isn't remembered as a restart point.
 """
 
 import collections
@@ -87,9 +96,11 @@ STUCK_SECONDS = 10          # an episode ends after this long without getting a 
                             # (16 units) closer to the current zone
 
 PROGRESS_CELLS = 100        # restart cells: slices of the run's progress per leg
+AMMO_RESTARTS = 0.5         # share of learner restarts that get back fired rockets
 
 # a remembered place to restart from: the env, and the episode so far
-Restart = collections.namedtuple("Restart", "snapshot leg frames history returns recent")
+# (held: the most rockets the player carried on the way there)
+Restart = collections.namedtuple("Restart", "snapshot leg frames history returns recent held")
 
 
 def _ptr(array):
@@ -162,7 +173,10 @@ class VecEnv:
         self.scout = np.arange(self.n) >= self.n - scouts
         self.restarts = {}
         self.visits = collections.Counter()
+        self.scout_visits = collections.Counter()
         self.from_spawn = np.ones(self.n, bool)        # this episode started at the spawn
+        self.synthetic = np.zeros(self.n, bool)        # it started from an ammo restart
+        self.held = np.zeros(self.n, np.int32)         # most rockets carried this episode
         self.rng = np.random.default_rng(0)
 
     # -- helpers ---------------------------------------------------------------
@@ -199,39 +213,51 @@ class VecEnv:
         for i, cell in zip(indices, cells):
             if cell not in self.seen[i]:
                 self.seen[i].add(cell)
-                if not self.scout[i]:
-                    self.visits[cell] += 1
+                (self.scout_visits if self.scout[i] else self.visits)[cell] += 1
             kept = self.restarts.get(cell)
-            if kept is None or self.frames[i] < kept.frames:
+            if not self.synthetic[i] and (kept is None or self.frames[i] < kept.frames):
                 snapshot = C.create_string_buffer(len(self.snapshot))
                 self.lib.gs_env_save(self.envs[i], snapshot)
                 self.restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
                                               self.history[i, :self.frames[i]].copy(),
-                                              float(self.returns[i]), self._recent_in_order(i))
+                                              float(self.returns[i]), self._recent_in_order(i),
+                                              int(self.held[i]))
 
     def _restart(self, indices):
         """Start new episodes: from the spawn, or (restart_fraction of them) from a
-        remembered cell, picked with weight 1 / sqrt(episodes that reached it + 1)."""
-        restart = self.rng.random(len(indices)) < self.restart_fraction if self.restarts else np.zeros(len(indices), bool)
-        restart &= ~self.scout[indices]
-        if restart.any():
-            cells = list(self.restarts)
-            weight = 1 / np.sqrt(np.array([self.visits[c] for c in cells]) + 1)
-            picks = iter(self.rng.choice(len(cells), size=restart.sum(), p=weight / weight.sum()))
+        remembered cell, picked with weight 1 / sqrt(episodes that reached it + 1).
+        Scouts pick only from cells where they'd still carry rockets."""
+        learner_cells = list(self.restarts)
+        scout_cells = [c for c in learner_cells if (c % 8) // 2 > 0]
+        restart = self.rng.random(len(indices)) < self.restart_fraction
+        restart &= np.where(self.scout[indices], len(scout_cells) > 0, len(learner_cells) > 0)
+        picks = {}
+        for scouts, cells, visits in ((False, learner_cells, self.visits), (True, scout_cells, self.scout_visits)):
+            group = restart & (self.scout[indices] == scouts)
+            if group.any():
+                weight = 1 / np.sqrt(np.array([visits[c] for c in cells]) + 1)
+                chosen = self.rng.choice(len(cells), size=group.sum(), p=weight / weight.sum())
+                picks.update(zip(indices[group], (cells[c] for c in chosen)))
+        self.synthetic[indices] = False
         for k, i in enumerate(indices):
             self.seen[i] = set()
             if restart[k]:
-                kept = self.restarts[cells[next(picks)]]
+                kept = self.restarts[picks[i]]
                 self.lib.gs_env_restore(self.envs[i], kept.snapshot)
                 self._set_leg(i, kept.leg)
                 self.frames[i] = kept.frames
                 self.history[i, :kept.frames] = kept.history
                 self.returns[i] = kept.returns
                 self.recent[i] = np.roll(kept.recent, self.tick)
+                self.held[i] = kept.held
+                rockets = (picks[i] % 8) // 2
+                if not self.scout[i] and rockets < kept.held and self.rng.random() < AMMO_RESTARTS:
+                    self.lib.gs_env_set_ammo(self.envs[i], sim.WP_ROCKET_LAUNCHER, kept.held)
+                    self.synthetic[i] = True
             else:
                 self.lib.gs_env_restore(self.envs[i], self.snapshot)
                 self._set_leg(i, 0)
-                self.frames[i] = self.returns[i] = self.recent[i] = 0
+                self.frames[i] = self.returns[i] = self.recent[i] = self.held[i] = 0
         self.from_spawn[indices] = ~restart
         self.closest[indices] = np.inf
         self.closer_frame[indices] = self.frames[indices]
@@ -278,6 +304,7 @@ class VecEnv:
             self.frames += 1
             self.lib.gs_step_batch(self.env_ptrs, _ptr(self.cmds), self.n, self.threads)
         self._observe()
+        self.held = np.maximum(self.held, self.states["rockets"])
 
         timer = self.states["timer_state"]
         dead = self.states["dead"] != 0
@@ -333,6 +360,7 @@ class VecEnv:
                 "returns": self.returns[ended].copy(),
                 "from_spawn": self.from_spawn[ended].copy(),
                 "scout": self.scout[ended].copy(),
+                "synthetic": self.synthetic[ended].copy(),
                 # how far along the run each got (for dead players, where they were last alive)
                 "progress": np.where(finished[ended], 1.0,
                                      self._progress(np.where(dead, prev_route, self.route)[ended],

@@ -134,6 +134,7 @@ def main():
 
     obs = torch.tensor(env.reset(), device=device)
     best_progress, best_time = 0.0, None
+    practice_finishes = 0       # finishes from ammo restarts (practice, not real runs)
     episodes, decisions, update = 0, 0, 0
     start = time.time()
 
@@ -159,8 +160,12 @@ def main():
                 ended_progress += list(info["progress"][spawn])
                 ended_returns += list(info["returns"][spawn])
                 ended_finished += list(info["finished"][spawn])
+                practice_finishes += int((info["finished"] & info["synthetic"]).sum())
                 for k, i in enumerate(info["ended"]):
-                    # keep the best runs so far, to watch in the real game
+                    # keep the best runs so far, to watch in the real game (not ammo
+                    # restarts: those never happened in a real run)
+                    if info["synthetic"][k]:
+                        continue
                     if info["finished"][k] and (best_time is None or info["timer_ms"][k] < best_time):
                         best_time = int(info["timer_ms"][k])
                         runfile.write(out / "best_time.run", env.make_run(info["runs"][i]))
@@ -226,7 +231,8 @@ def main():
             print(f"update {update:5d}  {elapsed / 60:5.1f} min  {decisions / 1e6:7.1f}M decisions  "
                   f"episodes {episodes:8d}  progress mean {mean_progress:5.1%} best {best_progress:5.1%}"
                   + (f"  best time {best_time / 1000:.3f} s" if best_time else "")
-                  + (f"  restart cells {len(env.restarts)}" if env.restarts else ""))
+                  + (f"  restart cells {len(env.restarts)}" if env.restarts else "")
+                  + (f"  practice finishes {practice_finishes}" if practice_finishes else ""))
 
     torch.save(agent.state_dict(), out / "agent.pt")
     writer.close()

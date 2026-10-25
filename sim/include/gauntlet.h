@@ -149,6 +149,9 @@ void		gs_env_set_route_target( gs_env_t *env, int target );
 // Put the player somewhere, like DeFRaG's placeplayer: origin, velocity and view yaw.
 // The timer, items and everything else are kept.
 void		gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw );
+// Set how much ammo the player has for a weapon (for training curricula and tests;
+// a real run only gets ammo from the map).
+void		gs_env_set_ammo( gs_env_t *env, int weapon, int ammo );
 
 // Whole-env snapshots, for restarting from a saved moment. Plain memory, safe to copy.
 size_t		gs_env_snapshot_size( void );

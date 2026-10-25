@@ -43,6 +43,12 @@ void gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3]
 	G_PlacePlayer( env, origin, velocity, yaw );
 }
 
+void gs_env_set_ammo( gs_env_t *env, int weapon, int ammo ) {
+	if ( weapon > WP_NONE && weapon < WP_NUM_WEAPONS ) {
+		env->ps.ammo[weapon] = ammo;
+	}
+}
+
 void gs_env_get_state( const gs_env_t *env, gs_state_t *out ) {
 	const playerState_t *ps = &env->ps;
 	VectorCopy( ps->origin, out->origin );

@@ -37,8 +37,16 @@ int main( int argc, char **argv ) {
 		envs[i] = gs_env_new();
 	}
 
+	// 1, 2, 4, ... threads, ending with every core
+	int counts[16], numCounts = 0;
+	for ( int t = 1; t < maxThreads && numCounts < 15; t *= 2 ) {
+		counts[numCounts++] = t;
+	}
+	counts[numCounts++] = maxThreads;
+
 	printf( "%s: %d envs x %d steps\n", map, NUM_ENVS, NUM_STEPS );
-	for ( int threads = 1; threads <= maxThreads; threads *= 2 ) {
+	for ( int c = 0; c < numCounts; c++ ) {
+		int threads = counts[c];
 		for ( int i = 0; i < NUM_ENVS; i++ ) {
 			gs_env_spawn( envs[i] );
 		}
@@ -50,9 +58,6 @@ int main( int argc, char **argv ) {
 		double sps = (double)NUM_ENVS * NUM_STEPS / dt;
 		printf( "  %2d threads: %10.0f steps/s = %7.0f seconds of play per second\n",
 				threads, sps, sps * GS_FRAME_MSEC / 1000.0 );
-		if ( threads * 2 > maxThreads && threads != maxThreads ) {
-			threads = maxThreads / 2;
-		}
 	}
 	return 0;
 }

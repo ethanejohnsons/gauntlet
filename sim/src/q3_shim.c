@@ -1,38 +1,33 @@
-// q3_shim.c -- the few engine services the vendored collision and movement code
-// needs: memory, file reads, cvars, printing, errors and SnapVector. Plus the
+// q3_shim.c -- stand-ins for the engine services the vendored collision and movement
+// code calls: errors and printing, memory, file reads, cvars and SnapVector. Plus the
 // per-thread visit stamps used by the patched cm_trace.c / cm_test.c.
 
-#include <setjmp.h>
-#include <pthread.h>
-#include <limits.h>
-
 #include "cm_local.h"
-#include "q3_shim.h"
+#include "sim_local.h"
 
 // ---------------------------------------------------------------------------
 // errors and printing
 
 static _Thread_local jmp_buf *gs_errorJmp;
-static _Thread_local char gs_errorMsg[1024];
 int gs_verbose = 0;
 
 void GS_SetErrorJump( jmp_buf *jb ) {
 	gs_errorJmp = jb;
 }
 
-const char *GS_LastError( void ) {
-	return gs_errorMsg;
-}
-
+// The vendored code calls this on fatal problems (a broken BSP, out of memory). The
+// message becomes gs_last_error(); during gs_load_map it jumps back there.
 void QDECL Com_Error( errorParm_t level, const char *fmt, ... ) {
+	char msg[1024];
 	va_list ap;
 	va_start( ap, fmt );
-	vsnprintf( gs_errorMsg, sizeof( gs_errorMsg ), fmt, ap );
+	vsnprintf( msg, sizeof( msg ), fmt, ap );
 	va_end( ap );
+	GS_SetError( "%s", msg );
 	if ( gs_errorJmp ) {
 		longjmp( *gs_errorJmp, 1 );
 	}
-	fprintf( stderr, "gauntlet: fatal: %s\n", gs_errorMsg );
+	fprintf( stderr, "gauntlet: fatal: %s\n", msg );
 	abort();
 }
 
@@ -109,7 +104,7 @@ void Z_Free( void *ptr ) {
 }
 
 // ---------------------------------------------------------------------------
-// files: CM_LoadMap reads the BSP through FS_ReadFile; the loader hands it over here
+// files: CM_LoadMap reads the BSP through FS_ReadFile; gs_load_map hands it over here
 
 static void *gs_pendingFile;
 static int gs_pendingLen;
@@ -148,7 +143,8 @@ unsigned Com_BlockChecksum( const void *buffer, int length ) {
 }
 
 // ---------------------------------------------------------------------------
-// cvars: collision reads a handful at load time; all keep their engine defaults
+// cvars: collision reads a handful at load time (cm_noCurves and the like); they all
+// keep the engine's defaults
 
 #define GS_MAX_CVARS 32
 static cvar_t gs_cvars[GS_MAX_CVARS];
@@ -176,6 +172,7 @@ cvar_t *Cvar_Get( const char *var_name, const char *value, int flags ) {
 void Cvar_SetDescription( cvar_t *var, const char *var_description ) {
 }
 
+// referenced by cm_patch.c's debug drawing, which never runs here
 void BotDrawDebugPolygons( void (*drawPoly)(int color, int numPoints, float *points), int value ) {
 }
 

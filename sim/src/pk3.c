@@ -1,6 +1,6 @@
 // pk3.c -- read a file out of the pk3 (zip) archives in a Quake III install.
-// Like the engine, pk3s are searched baseq3 first, then the mod directory, with
-// later archives (in sorted order) overriding earlier ones.
+// Same priority as the engine: the mod folder beats baseq3, and inside a folder the
+// archive that sorts last wins.
 
 #include <dirent.h>
 #include <stdint.h>
@@ -10,13 +10,13 @@
 #include <strings.h>
 #include <zlib.h>
 
-#include "pk3.h"
+#include "sim_local.h"
 
-static uint16_t rd16( const uint8_t *p ) { return p[0] | p[1] << 8; }
-static uint32_t rd32( const uint8_t *p ) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
+static uint16_t Read16( const uint8_t *p ) { return p[0] | p[1] << 8; }
+static uint32_t Read32( const uint8_t *p ) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 
 // Look for `name` (case-insensitive) in one zip. Returns 1 and the file's data if found.
-static int zip_extract( const char *zippath, const char *name, void **out, int *outlen ) {
+static int ZipRead( const char *zippath, const char *name, void **out, int *outlen ) {
 	FILE *f = fopen( zippath, "rb" );
 	if ( !f ) {
 		return 0;
@@ -35,7 +35,7 @@ static int zip_extract( const char *zippath, const char *name, void **out, int *
 	}
 	long eocd = -1;
 	for ( long i = tail - 22; i >= 0; i-- ) {
-		if ( rd32( buf + i ) == 0x06054b50 ) {
+		if ( Read32( buf + i ) == 0x06054b50 ) {
 			eocd = i;
 			break;
 		}
@@ -43,9 +43,9 @@ static int zip_extract( const char *zippath, const char *name, void **out, int *
 	if ( eocd < 0 ) {
 		goto done;
 	}
-	uint32_t cdCount = rd16( buf + eocd + 10 );
-	uint32_t cdSize = rd32( buf + eocd + 12 );
-	uint32_t cdOfs = rd32( buf + eocd + 16 );
+	uint32_t cdCount = Read16( buf + eocd + 10 );
+	uint32_t cdSize = Read32( buf + eocd + 12 );
+	uint32_t cdOfs = Read32( buf + eocd + 16 );
 
 	cd = malloc( cdSize );
 	fseek( f, cdOfs, SEEK_SET );
@@ -56,22 +56,22 @@ static int zip_extract( const char *zippath, const char *name, void **out, int *
 	size_t namelen = strlen( name );
 	uint8_t *p = cd;
 	for ( uint32_t i = 0; i < cdCount && p + 46 <= cd + cdSize; i++ ) {
-		if ( rd32( p ) != 0x02014b50 ) {
+		if ( Read32( p ) != 0x02014b50 ) {
 			break;
 		}
-		uint16_t method = rd16( p + 10 );
-		uint32_t csize = rd32( p + 20 ), usize = rd32( p + 24 );
-		uint16_t fnlen = rd16( p + 28 ), exlen = rd16( p + 30 ), cmlen = rd16( p + 32 );
-		uint32_t lhOfs = rd32( p + 42 );
+		uint16_t method = Read16( p + 10 );
+		uint32_t csize = Read32( p + 20 ), usize = Read32( p + 24 );
+		uint16_t fnlen = Read16( p + 28 ), exlen = Read16( p + 30 ), cmlen = Read16( p + 32 );
+		uint32_t lhOfs = Read32( p + 42 );
 		const char *fn = (const char *)p + 46;
 
 		if ( fnlen == namelen && !strncasecmp( fn, name, namelen ) && ( method == 0 || method == 8 ) ) {
 			uint8_t lh[30];
 			fseek( f, lhOfs, SEEK_SET );
-			if ( fread( lh, 1, 30, f ) != 30 || rd32( lh ) != 0x04034b50 ) {
+			if ( fread( lh, 1, 30, f ) != 30 || Read32( lh ) != 0x04034b50 ) {
 				goto done;
 			}
-			fseek( f, lhOfs + 30 + rd16( lh + 26 ) + rd16( lh + 28 ), SEEK_SET );
+			fseek( f, lhOfs + 30 + Read16( lh + 26 ) + Read16( lh + 28 ), SEEK_SET );
 			comp = malloc( csize ? csize : 1 );
 			if ( fread( comp, 1, csize, f ) != csize ) {
 				goto done;
@@ -112,20 +112,20 @@ done:
 	return found;
 }
 
-static int pk3_sort( const struct dirent **a, const struct dirent **b ) {
+static int Pk3Compare( const struct dirent **a, const struct dirent **b ) {
 	// the engine orders pk3s with a case-insensitive compare (FS_PathCmp)
 	return strcasecmp( ( *a )->d_name, ( *b )->d_name );
 }
 
-static int is_pk3( const struct dirent *d ) {
+static int IsPk3( const struct dirent *d ) {
 	size_t n = strlen( d->d_name );
 	return n > 4 && !strcasecmp( d->d_name + n - 4, ".pk3" );
 }
 
 // Search one directory; the last (highest-sorting) pk3 containing the file wins.
-static int dir_extract( const char *dir, const char *name, void **out, int *outlen, char *srcpk3, size_t srclen ) {
+static int DirRead( const char *dir, const char *name, void **out, int *outlen, char *srcpk3, size_t srclen ) {
 	struct dirent **list;
-	int n = scandir( dir, &list, is_pk3, pk3_sort );
+	int n = scandir( dir, &list, IsPk3, Pk3Compare );
 	if ( n < 0 ) {
 		return 0;
 	}
@@ -133,7 +133,7 @@ static int dir_extract( const char *dir, const char *name, void **out, int *outl
 	for ( int i = n - 1; i >= 0 && !found; i-- ) {
 		char path[4096];
 		snprintf( path, sizeof( path ), "%s/%s", dir, list[i]->d_name );
-		if ( zip_extract( path, name, out, outlen ) ) {
+		if ( ZipRead( path, name, out, outlen ) ) {
 			found = 1;
 			if ( srcpk3 ) {
 				snprintf( srcpk3, srclen, "%s", path );
@@ -147,15 +147,16 @@ static int dir_extract( const char *dir, const char *name, void **out, int *outl
 	return found;
 }
 
-int pk3_read_file( const char *basepath, const char *game, const char *name, void **out, int *outlen, char *srcpk3, size_t srclen ) {
+int GS_ReadPk3File( const char *basepath, const char *game, const char *name,
+					void **out, int *outlen, char *srcpk3, size_t srclen ) {
 	char dir[4096];
 	// the mod directory overrides baseq3
 	if ( game && game[0] ) {
 		snprintf( dir, sizeof( dir ), "%s/%s", basepath, game );
-		if ( dir_extract( dir, name, out, outlen, srcpk3, srclen ) ) {
+		if ( DirRead( dir, name, out, outlen, srcpk3, srclen ) ) {
 			return 1;
 		}
 	}
 	snprintf( dir, sizeof( dir ), "%s/baseq3", basepath );
-	return dir_extract( dir, name, out, outlen, srcpk3, srclen );
+	return DirRead( dir, name, out, outlen, srcpk3, srclen );
 }

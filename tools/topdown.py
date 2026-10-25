@@ -4,7 +4,7 @@
 The floor comes from collision traces only (no textures): brighter means higher.
 Zones from the entity list are outlined: start timer (green), stop timer (red),
 checkpoints (yellow), teleporters (purple), jump pads (cyan), kill zones (dark red).
-The run is the scripted strafe jumper from sim/tests/test_strafe.c, coloured by speed.
+The run is the scripted strafe jumper (py/gauntlet/bots.py), coloured by speed.
 
     python3 tools/topdown.py vanilla_01 -o vanilla_01.png
 """
@@ -45,6 +45,11 @@ def floor_heights(info, cell):
                 z = hit[2] - 0.5
             if len(surfaces) >= 2:
                 heights[(i, j)] = surfaces[1]   # [0] is the outside of the roof/sky
+    # Outside the playable area the first floor found is the bottom of the sky box,
+    # the lowest surface of all; leave those cells as background.
+    if heights:
+        void = min(heights.values())
+        heights = {k: z for k, z in heights.items() if z > void + 1}
     return heights, w, h
 
 
@@ -112,14 +117,7 @@ def main():
         raise SystemExit(str(e))
 
     heights, w, h = floor_heights(info, args.cell)
-    # The lowest surface everywhere outside the playable area is the bottom of the
-    # sky box; leave it as background.
-    zs = sorted(heights.values())
-    if zs:
-        void = zs[0]
-        heights = {k: z for k, z in heights.items() if z > void + 1}
-        zs = sorted(heights.values())
-    lo, hi = (zs[0], zs[-1]) if zs else (0, 1)
+    lo, hi = (min(heights.values()), max(heights.values())) if heights else (0, 1)
     scale = 2
     img = Image.new("RGB", (w * scale, h * scale), (18, 18, 22))
     d = ImageDraw.Draw(img)

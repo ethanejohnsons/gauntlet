@@ -1,96 +1,13 @@
-// env.c -- the public API: loading a map, map info, and creating, stepping and
-// saving envs. The work happens in entities.c, world.c, game.c and pool.c.
+// env.c -- the players: creating, stepping, placing and saving envs, and stepping
+// many of them at once on a worker pool (gs_step_batch).
 
-#include <setjmp.h>
-#include <stdarg.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 #include "sim_local.h"
-#include "pk3.h"
-#include "q3_shim.h"
-
-gsWorld_t gs_world;
-static char gs_error[1024];
-static char gs_source[512];
-
-const char *gs_last_error( void ) {
-	return gs_error;
-}
-
-void GS_SetError( const char *fmt, ... ) {
-	va_list ap;
-	va_start( ap, fmt );
-	vsnprintf( gs_error, sizeof( gs_error ), fmt, ap );
-	va_end( ap );
-}
-
-void gs_set_verbose( int level ) {
-	gs_verbose = level;
-}
-
-// ---------------------------------------------------------------------------
-// map loading
-
-int gs_load_map( const char *basepath, const char *game, const char *map ) {
-	char name[MAX_QPATH];
-	void *data;
-	int len;
-	jmp_buf jb;
-
-	gs_error[0] = 0;
-	snprintf( name, sizeof( name ), "maps/%s.bsp", map );
-	if ( !pk3_read_file( basepath, game, name, &data, &len, gs_source, sizeof( gs_source ) ) ) {
-		GS_SetError( "%s not found in %s/%s or %s/baseq3", name, basepath, game, basepath );
-		return -1;
-	}
-
-	if ( setjmp( jb ) ) {
-		GS_SetErrorJump( NULL );
-		GS_SetError( "%s", GS_LastError() );
-		gs_world.loaded = 0;
-		return -1;
-	}
-	GS_SetErrorJump( &jb );
-
-	gs_world.loaded = 0;
-	GS_HunkClear();
-	GS_SetPendingFile( data, len );
-	int checksum;
-	CM_LoadMap( name, qfalse, &checksum );
-	GS_BumpMapGeneration();
-	GS_SetErrorJump( NULL );
-
-	Q_strncpyz( gs_world.mapname, map, sizeof( gs_world.mapname ) );
-	if ( GS_ParseEntities() < 0 ) {
-		return -1;
-	}
-	G_InitEntities();
-	gs_world.loaded = 1;
-	return 0;
-}
-
-void gs_map_info( gs_map_info_t *info ) {
-	memset( info, 0, sizeof( *info ) );
-	if ( !gs_world.loaded ) {
-		return;
-	}
-	Q_strncpyz( info->mapname, gs_world.mapname, sizeof( info->mapname ) );
-	Q_strncpyz( info->source, gs_source, sizeof( info->source ) );
-	info->num_entities = gs_world.numEnts;
-	info->num_unsupported = gs_world.numUnsupported;
-	info->has_timer = gs_world.hasTimer;
-	if ( gs_world.spawnEnt >= 0 ) {
-		VectorCopy( gs_world.ents[ gs_world.spawnEnt ].origin, info->spawn_origin );
-		VectorCopy( gs_world.ents[ gs_world.spawnEnt ].angles, info->spawn_angles );
-	}
-	CM_ModelBounds( 0, info->world_mins, info->world_maxs );
-}
-
-// ---------------------------------------------------------------------------
-// envs
 
 gs_env_t *gs_env_new( void ) {
-	gs_env_t *env = calloc( 1, sizeof( *env ) );
-	return env;
+	return calloc( 1, sizeof( gs_env_t ) );
 }
 
 void gs_env_free( gs_env_t *env ) {
@@ -106,9 +23,9 @@ void gs_env_step( gs_env_t *env, const gs_cmd_t *in ) {
 	memset( &cmd, 0, sizeof( cmd ) );
 	// the client sends one command per 8 ms frame (com_maxfps 125)
 	cmd.serverTime = env->ps.commandTime + GS_FRAME_MSEC;
-	cmd.angles[0] = in->angles[0];
-	cmd.angles[1] = in->angles[1];
-	cmd.angles[2] = in->angles[2];
+	for ( int i = 0; i < 3; i++ ) {
+		cmd.angles[i] = in->angles[i];
+	}
 	cmd.forwardmove = in->forward;
 	cmd.rightmove = in->right;
 	cmd.upmove = in->up;
@@ -155,3 +72,91 @@ void gs_env_restore( gs_env_t *env, const void *buf ) {
 	memcpy( env, buf, sizeof( *env ) );
 }
 
+// ---------------------------------------------------------------------------
+// gs_step_batch: helper threads are started on first use and then wait for work.
+// Each batch is cut into chunks of GS_CHUNK envs; every thread, including the
+// caller, keeps taking the next chunk until none are left.
+
+#define GS_MAX_THREADS	256
+#define GS_CHUNK		16
+
+static struct {
+	pthread_mutex_t	lock;
+	pthread_cond_t	start;			// signalled when a new batch is ready
+	pthread_cond_t	done;			// signalled when the last helper finishes
+	pthread_t		threads[GS_MAX_THREADS];
+	int				numThreads;
+	int				batch;			// incremented for every batch
+	int				busy;			// helpers still working on the current batch
+
+	gs_env_t		**envs;
+	const gs_cmd_t	*cmds;
+	int				n;
+	atomic_int		next;			// first env of the next chunk
+} pool = { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, PTHREAD_COND_INITIALIZER };
+
+static void StepChunks( void ) {
+	while ( 1 ) {
+		int i = atomic_fetch_add( &pool.next, GS_CHUNK );
+		if ( i >= pool.n ) {
+			return;
+		}
+		int end = i + GS_CHUNK < pool.n ? i + GS_CHUNK : pool.n;
+		for ( ; i < end; i++ ) {
+			gs_env_step( pool.envs[i], &pool.cmds[i] );
+		}
+	}
+}
+
+static void *Helper( void *arg ) {
+	int lastBatch = 0;
+	pthread_mutex_lock( &pool.lock );
+	while ( 1 ) {
+		while ( pool.batch == lastBatch ) {
+			pthread_cond_wait( &pool.start, &pool.lock );
+		}
+		lastBatch = pool.batch;
+		pthread_mutex_unlock( &pool.lock );
+
+		StepChunks();
+
+		pthread_mutex_lock( &pool.lock );
+		if ( --pool.busy == 0 ) {
+			pthread_cond_signal( &pool.done );
+		}
+	}
+	return NULL;
+}
+
+void gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads ) {
+	if ( nthreads <= 1 || n <= GS_CHUNK ) {
+		for ( int i = 0; i < n; i++ ) {
+			gs_env_step( envs[i], &cmds[i] );
+		}
+		return;
+	}
+	if ( nthreads > GS_MAX_THREADS ) {
+		nthreads = GS_MAX_THREADS;
+	}
+
+	pthread_mutex_lock( &pool.lock );
+	while ( pool.numThreads < nthreads - 1 ) {		// the caller is the last thread
+		pthread_create( &pool.threads[pool.numThreads++], NULL, Helper, NULL );
+	}
+	pool.envs = envs;
+	pool.cmds = cmds;
+	pool.n = n;
+	atomic_store( &pool.next, 0 );
+	pool.busy = pool.numThreads;
+	pool.batch++;
+	pthread_cond_broadcast( &pool.start );
+	pthread_mutex_unlock( &pool.lock );
+
+	StepChunks();
+
+	pthread_mutex_lock( &pool.lock );
+	while ( pool.busy > 0 ) {
+		pthread_cond_wait( &pool.done, &pool.lock );
+	}
+	pthread_mutex_unlock( &pool.lock );
+}

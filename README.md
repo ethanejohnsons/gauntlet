@@ -14,13 +14,30 @@ public servers.
 
 | Path | What |
 |---|---|
-| `sim/` | libgauntlet (C): vendored Q3 code in `sim/q3`, map loading, triggers, batch step API |
-| `py/gauntlet/` | Python binding (cffi) and vector environment |
-| `train/` | PPO training, observations, rewards, curriculum |
-| `engine/oDFe/` | oDFe engine (submodule), plus our patches for input replay and telemetry |
-| `viewer/` | Compositor: game footage + neural net + stats, streamed or recorded with ffmpeg |
-| `tools/` | Sim-vs-engine validation, scheduler, clip rendering |
-| `maps/custom/` | Our own training map sources |
+| `sim/` | **libgauntlet** (C): Q3's movement and collision code run headless, at ~10M steps/s |
+| `sim/q3/` | Vendored Quake III source, changed as little as possible ([PATCHES.md](sim/q3/PATCHES.md)) |
+| `sim/src/` | Our code around it: map loading, game logic, the public API |
+| `sim/tests/` | C tests and a benchmark (`ctest`) |
+| `py/gauntlet/` | Python: ctypes binding for libgauntlet, `.run` files, scripted bots |
+| `tools/` | Command-line tools: export a run, replay it in oDFe, compare, render video, top-down map view |
+| `engine/` | oDFe as a submodule, our private patches, and the build script that applies them |
+| `docs/setup.md` | Building, running and watching runs |
+| `train/`, `viewer/`, `maps/custom/` | Not started: training (M3), the stream viewer (M4), custom maps |
+
+## Reading the code
+
+A good order:
+
+1. [sim/include/gauntlet.h](sim/include/gauntlet.h): the whole public API of the sim, about 100 lines.
+2. [sim/src/sim_local.h](sim/src/sim_local.h): what each source file does and the shared data.
+3. [sim/src/game.c](sim/src/game.c): what happens each frame (`G_ClientThink`), spawning, triggers.
+4. [sim/src/world.c](sim/src/world.c): loading a map and its entities, and the world queries.
+5. [sim/src/env.c](sim/src/env.c): the player API and the thread pool.
+6. [py/gauntlet/](py/gauntlet/) and [tools/](tools/): driving the sim from Python and replaying in the real game.
+
+The vendored code in `sim/q3/` is id's and oDFe's, kept as close to the original as
+possible; you don't need to read it to follow ours. The one movement file worth a
+look is `sim/q3/game/bg_pmove.c`, which is Q3's actual player movement.
 
 ## Game data
 

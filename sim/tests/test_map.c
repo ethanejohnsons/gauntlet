@@ -5,16 +5,19 @@
 int main( int argc, char **argv ) {
 	const char *map = argc > 1 ? argv[1] : "vanilla_01";
 	gs_map_info_t info;
+	gs_entity_t ent;
 	gs_state_t s;
-	char unsupported[4096];
 
 	load_or_die( map );
 	gs_map_info( &info );
 	printf( "%s from %s\n", info.mapname, info.source );
 	printf( "  %d entities, timer %s, %d unsupported\n", info.num_entities,
 			info.has_timer ? "yes" : "no", info.num_unsupported );
-	if ( gs_unsupported_entities( unsupported, sizeof( unsupported ) ) > 0 ) {
-		printf( "%s", unsupported );
+	for ( int i = 0; gs_entity( i, &ent ) == 0; i++ ) {
+		if ( !ent.supported ) {
+			printf( "    unsupported: %s (%.0f %.0f %.0f)\n", ent.classname,
+					ent.origin[0], ent.origin[1], ent.origin[2] );
+		}
 	}
 	printf( "  spawn (%.0f %.0f %.0f) yaw %.0f\n", info.spawn_origin[0], info.spawn_origin[1],
 			info.spawn_origin[2], info.spawn_angles[1] );

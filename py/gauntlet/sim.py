@@ -1,6 +1,11 @@
 """ctypes binding for libgauntlet (sim/include/gauntlet.h).
 
-The structs below must match gauntlet.h field for field.
+    info = sim.load_map("vanilla_01")
+    env = sim.Env()
+    state = env.spawn()
+    state = env.step(cmd)          # cmd is a sim.Cmd; one 8 ms frame
+
+The ctypes structs below must match gauntlet.h field for field.
 """
 
 import ctypes as C
@@ -93,15 +98,16 @@ def entities():
     return out
 
 
-def trace(start, end, endpos=None):
-    """Point trace through the world; returns (fraction, endpos)."""
+def trace(start, end):
+    """Point trace through the world: (fraction of the way that is clear, end point)."""
     hit = Vec3()
     frac = lib().gs_trace(Vec3(*start), Vec3(*end), None, None, hit)
     return frac, (hit[0], hit[1], hit[2])
 
 
 class Env:
-    """One simulated player on the loaded map."""
+    """One simulated player on the loaded map. step() and spawn() return the
+    player's State; the same object is reused, so copy values you want to keep."""
 
     def __init__(self):
         self._lib = lib()

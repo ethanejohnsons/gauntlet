@@ -15,48 +15,44 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)
 
-# Engine side: collision code and shared helpers exactly as oDFe builds them,
-# plus the shims that stand in for the rest of the engine.
-add_library(q3 STATIC
-  q3/qcommon/cm_load.c
-  q3/qcommon/cm_patch.c
-  q3/qcommon/cm_polylib.c
-  q3/qcommon/cm_test.c
-  q3/qcommon/cm_trace.c
-  q3/qcommon/q_math.c
-  q3/qcommon/q_shared.c
-  src/q3_shim.c
-)
-target_include_directories(q3 PUBLIC q3/qcommon q3/game src include)
-target_compile_definitions(q3 PUBLIC GAUNTLET_SIM)
-target_compile_options(q3 PRIVATE ${GS_FLOAT_FLAGS} -w)
-set_target_properties(q3 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+# The vendored Q3 code is compiled as-is with warnings off; our own files get warnings.
+set(Q3_ENGINE_SOURCES
+  q3/qcommon/cm_load.c q3/qcommon/cm_patch.c q3/qcommon/cm_polylib.c
+  q3/qcommon/cm_test.c q3/qcommon/cm_trace.c q3/qcommon/q_math.c q3/qcommon/q_shared.c)
+set(Q3_GAME_SOURCES
+  q3/game/bg_pmove.c q3/game/bg_slidemove.c q3/game/bg_misc.c q3/game/q_math_vm.c)
+set_source_files_properties(${Q3_ENGINE_SOURCES} ${Q3_GAME_SOURCES} PROPERTIES COMPILE_OPTIONS -w)
+set(GS_WARNINGS -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -Wno-sign-compare)
 
+# Engine side: collision and shared math exactly as oDFe builds them, the shims that
+# stand in for the rest of the engine, and our map and player code.
+add_library(gauntlet SHARED
+  ${Q3_ENGINE_SOURCES}
+  src/q3_shim.c
+  src/pk3.c
+  src/world.c
+  src/env.c
+)
 # Game side: what runs inside DeFRaG's qagame.qvm, compiled with the QVM's float
 # semantics (single-precision constants, float-returning math syscalls, id's
 # game-side q_math). See q3/game/bg_vmcompat.h.
-add_library(q3game STATIC
-  q3/game/bg_pmove.c
-  q3/game/bg_slidemove.c
-  q3/game/bg_misc.c
-  q3/game/q_math_vm.c
+add_library(q3game OBJECT
+  ${Q3_GAME_SOURCES}
   src/game.c
 )
-target_link_libraries(q3game PUBLIC q3)
-target_compile_options(q3game PRIVATE ${GS_FLOAT_FLAGS} -fsingle-precision-constant
-  -include ${CMAKE_CURRENT_SOURCE_DIR}/q3/game/bg_vmcompat.h -w)
+foreach(lib gauntlet q3game)
+  target_include_directories(${lib} PRIVATE q3/qcommon q3/game src)
+  target_include_directories(${lib} PUBLIC include)
+  target_compile_definitions(${lib} PRIVATE GAUNTLET_SIM)
+  target_compile_options(${lib} PRIVATE ${GS_FLOAT_FLAGS})
+endforeach()
+target_compile_options(q3game PRIVATE -fsingle-precision-constant
+  -include ${CMAKE_CURRENT_SOURCE_DIR}/q3/game/bg_vmcompat.h)
+set_source_files_properties(src/game.c src/q3_shim.c src/pk3.c src/world.c src/env.c
+  PROPERTIES COMPILE_OPTIONS "${GS_WARNINGS}")
 set_target_properties(q3game PROPERTIES POSITION_INDEPENDENT_CODE ON)
-
-add_library(gauntlet SHARED
-  src/pk3.c
-  src/env.c
-  src/entities.c
-  src/world.c
-  src/pool.c
-)
-target_include_directories(gauntlet PUBLIC include PRIVATE src)
-target_compile_options(gauntlet PRIVATE ${GS_FLOAT_FLAGS} -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
-target_link_libraries(gauntlet PRIVATE q3game q3 ZLIB::ZLIB Threads::Threads m)
+target_sources(gauntlet PRIVATE $<TARGET_OBJECTS:q3game>)
+target_link_libraries(gauntlet PRIVATE ZLIB::ZLIB Threads::Threads m)
 
 enable_testing()
 foreach(t test_map test_strafe test_threads test_items)

@@ -1,20 +1,25 @@
-// game.c -- the parts of the Quake III game module that move a DeFRaG player:
-// spawning, ClientThink, trigger touches, teleports, jump pads, target_push, powerup
-// items (haste, flight) and DeFRaG's timer targets. Rewritten from id's 1.32
-// g_active.c / g_client.c / g_trigger.c / g_misc.c / g_items.c / g_utils.c.
-// DeFRaG's own game code is closed source, so the timer behavior is our best
-// reading of it and is checked against the real mod (M2).
+// game.c -- the game-module side of a DeFRaG player: what id's 1.32 game code does
+// around pmove. Each function names the Q3 function it was rewritten from.
 //
-// Compiled like the QVM (see bg_vmcompat.h), because in the real game this all
-// runs inside DeFRaG's qagame.qvm.
+//   at map load    jump pad aiming, target_push setup, items dropping to the floor
+//   every frame    G_ClientThink: pmove, then touching triggers and items
+//   on spawn       G_SpawnPlayer, and G_PlacePlayer for starting mid-map
+//
+// DeFRaG's own game code is closed source, so its timer targets are our best reading
+// of the mod, checked against the real engine (tools/compare_run.py).
+//
+// Compiled like the QVM (see q3/game/bg_vmcompat.h), because in the real game all of
+// this runs inside DeFRaG's qagame.qvm.
 
 #include "sim_local.h"
 
-static const vec3_t	playerMins = { -15, -15, -24 };
-static const vec3_t	playerMaxs = { 15, 15, 32 };
+#define DEFAULT_GRAVITY		800		// g_gravity
+#define DEFAULT_SPEED		320		// g_speed
+#define RESPAWN_POWERUP		120		// seconds, unless the item has a "wait" key
 
-#define DEFAULT_GRAVITY		800
-#define DEFAULT_SPEED		320
+// ===========================================================================
+// at map load
+// ===========================================================================
 
 /*
 =================
@@ -136,6 +141,13 @@ static void FinishSpawningItem( gsEnt_t *ent ) {
 	ent->contents = CONTENTS_TRIGGER;
 }
 
+/*
+=================
+G_InitEntities
+
+The spawn-time setup the game does for each entity, once the map is parsed.
+=================
+*/
 void G_InitEntities( void ) {
 	for ( int i = 0; i < gs_world.numEnts; i++ ) {
 		gsEnt_t *ent = &gs_world.ents[i];
@@ -155,9 +167,15 @@ void G_InitEntities( void ) {
 	}
 }
 
+// ===========================================================================
+// player helpers
+// ===========================================================================
+
 /*
 =================
 SetClientViewAngle (g_client.c)
+
+The view is cmd angles + delta_angles, so turning the player means changing delta_angles.
 =================
 */
 static void SetClientViewAngle( gs_env_t *env, const vec3_t angle ) {
@@ -200,22 +218,19 @@ static void TeleportPlayer( gs_env_t *env, const vec3_t origin, const vec3_t ang
 	SetClientViewAngle( env, angles );
 }
 
+// ===========================================================================
+// every frame
+// ===========================================================================
+
 /*
 =================
-Target use: G_UseTargets + the DeFRaG timer targets
+G_UseEntity
+
+What a target does when a trigger (or item, or spawn point) fires it: DeFRaG's
+timer targets, kills, teleports, pushes, and items appearing.
 =================
 */
-static void G_UseEntity( gs_env_t *env, gsEnt_t *ent );
-
-static void G_UseTargets( gs_env_t *env, const gsEnt_t *ent ) {
-	for ( int i = 0; i < ent->numTargets; i++ ) {
-		G_UseEntity( env, &gs_world.ents[ ent->targets[i] ] );
-	}
-}
-
 static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
-	int index = ent - gs_world.ents;
-
 	switch ( ent->type ) {
 	case GE_TARGET_START_TIMER:
 		// Touching the start zone keeps restarting the timer, so in effect the
@@ -224,7 +239,7 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 		env->timerStart = env->ps.commandTime;
 		env->timerMs = 0;
 		env->checkpoints = 0;
-		memset( env->checkpointMask, 0, sizeof( env->checkpointMask ) );
+		memset( env->checkpointSeen, 0, sizeof( env->checkpointSeen ) );
 		break;
 	case GE_TARGET_STOP_TIMER:
 		if ( env->timerState == GS_TIMER_RUNNING ) {
@@ -233,8 +248,8 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 		}
 		break;
 	case GE_TARGET_CHECKPOINT:
-		if ( env->timerState == GS_TIMER_RUNNING && !( env->checkpointMask[index >> 5] & ( 1 << ( index & 31 ) ) ) ) {
-			env->checkpointMask[index >> 5] |= 1 << ( index & 31 );
+		if ( env->timerState == GS_TIMER_RUNNING && !env->checkpointSeen[ ent->slot ] ) {
+			env->checkpointSeen[ ent->slot ] = 1;
 			env->checkpoints++;
 		}
 		break;
@@ -249,7 +264,7 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 		break;
 	case GE_ITEM_POWERUP:
 		// Use_Item: a targeted item appears when used
-		env->itemReady[ ent->itemSlot ] = 0;
+		env->itemReady[ ent->slot ] = 0;
 		break;
 	case GE_TARGET_TELEPORTER:
 		if ( ent->numTargets ) {
@@ -262,13 +277,23 @@ static void G_UseEntity( gs_env_t *env, gsEnt_t *ent ) {
 	}
 }
 
+
+/*
+=================
+G_UseTargets (g_utils.c)
+=================
+*/
+static void G_UseTargets( gs_env_t *env, const gsEnt_t *ent ) {
+	for ( int i = 0; i < ent->numTargets; i++ ) {
+		G_UseEntity( env, &gs_world.ents[ ent->targets[i] ] );
+	}
+}
+
 /*
 =================
 Touch_Item / Pickup_Powerup (g_items.c), for powerups
 =================
 */
-#define RESPAWN_POWERUP		120
-
 static void Touch_Item( gs_env_t *env, gsEnt_t *ent ) {
 	playerState_t *ps = &env->ps;
 	int respawn;
@@ -290,7 +315,7 @@ static void Touch_Item( gs_env_t *env, gsEnt_t *ent ) {
 
 	// wait of -1 will not respawn
 	if ( ent->wait == -1 ) {
-		env->itemReady[ ent->itemSlot ] = GS_ITEM_HIDDEN;
+		env->itemReady[ ent->slot ] = GS_ITEM_HIDDEN;
 		return;
 	}
 
@@ -298,7 +323,7 @@ static void Touch_Item( gs_env_t *env, gsEnt_t *ent ) {
 	if ( ent->wait ) {
 		respawn = ent->wait;
 	}
-	env->itemReady[ ent->itemSlot ] = env->levelTime + respawn * 1000;
+	env->itemReady[ ent->slot ] = env->levelTime + respawn * 1000;
 }
 
 /*
@@ -337,7 +362,7 @@ static void G_TouchTriggers( gs_env_t *env, const vec3_t rmins, const vec3_t rma
 		// use seperate code for determining if an item is picked up
 		// so you don't have to actually contact its bounding box
 		if ( hit->type == GE_ITEM_POWERUP ) {
-			if ( env->itemReady[ hit->itemSlot ] > env->levelTime ) {
+			if ( env->itemReady[ hit->slot ] > env->levelTime ) {
 				continue;	// taken, not linked
 			}
 			entityState_t item;
@@ -446,6 +471,10 @@ void G_ClientThink( gs_env_t *env, const usercmd_t *cmd ) {
 	}
 }
 
+// ===========================================================================
+// on spawn
+// ===========================================================================
+
 /*
 =================
 G_SpawnPlayer (ClientSpawn in g_client.c, movement-relevant parts)
@@ -491,7 +520,7 @@ void G_SpawnPlayer( gs_env_t *env ) {
 	for ( int i = 0; i < gs_world.numEnts; i++ ) {
 		const gsEnt_t *ent = &gs_world.ents[i];
 		if ( ent->type == GE_ITEM_POWERUP ) {
-			env->itemReady[ ent->itemSlot ] = ent->targetname[0] ? GS_ITEM_HIDDEN : 0;
+			env->itemReady[ ent->slot ] = ent->targetname[0] ? GS_ITEM_HIDDEN : 0;
 		}
 	}
 

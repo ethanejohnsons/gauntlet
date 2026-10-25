@@ -1,8 +1,14 @@
 // gauntlet.h -- libgauntlet: headless Quake III / DeFRaG (VQ3) movement simulation
 //
-// One map is loaded per process. Any number of players (envs) can be stepped on it,
-// in parallel with gs_step_batch. Physics run in fixed 8 ms frames, like DeFRaG's
-// pmove_fixed 1 / pmove_msec 8.
+// Typical use:
+//   gs_load_map( "~/Games/quake3", "defrag", "vanilla_01" );
+//   gs_env_t *env = gs_env_new();
+//   gs_env_spawn( env );
+//   for each frame: gs_env_step( env, &cmd ); gs_env_get_state( env, &state );
+//
+// One map is loaded per process (Q3's collision code keeps it in a global). Any
+// number of players (envs) can be stepped on it, in parallel with gs_step_batch.
+// Physics run in fixed 8 ms frames, like DeFRaG's pmove_fixed 1 / pmove_msec 8.
 
 #ifndef GAUNTLET_H
 #define GAUNTLET_H
@@ -16,7 +22,7 @@ extern "C" {
 
 #define GS_FRAME_MSEC		8
 
-#define GS_BUTTON_ATTACK	1
+#define GS_BUTTON_ATTACK	1		// gs_cmd_t.buttons
 #define GS_BUTTON_WALKING	16
 
 #define GS_TIMER_IDLE		0	// not started
@@ -34,6 +40,7 @@ typedef struct {
 	uint8_t	buttons;
 } gs_cmd_t;
 
+// What a player looks like after a step.
 typedef struct {
 	float	origin[3];
 	float	velocity[3];
@@ -52,6 +59,7 @@ typedef struct {
 	int32_t	flight_ms;
 } gs_state_t;
 
+// Facts about the loaded map.
 typedef struct {
 	char	mapname[64];
 	char	source[512];		// pk3 the BSP came from
@@ -77,37 +85,41 @@ typedef struct {
 
 typedef struct gs_env gs_env_t;
 
+// --- the map ---------------------------------------------------------------
+
 // Load maps/<map>.bsp from <basepath>/<game>/*.pk3 or <basepath>/baseq3/*.pk3.
 // Returns 0 on success, -1 on error (see gs_last_error).
 int			gs_load_map( const char *basepath, const char *game, const char *map );
 const char	*gs_last_error( void );
 void		gs_map_info( gs_map_info_t *info );
-// Name and reason for each unsupported entity, one per line. Returns length written.
-int			gs_unsupported_entities( char *buf, int buflen );
-void		gs_set_verbose( int level );
 int			gs_num_entities( void );
 int			gs_entity( int index, gs_entity_t *out );	// 0 on success, -1 if out of range
+// World trace, e.g. for observations: the fraction of start->end that is clear, and
+// where it stopped. mins/maxs give a box (NULL for a point); endpos may be NULL.
+float		gs_trace( const float start[3], const float end[3], const float mins[3],
+					  const float maxs[3], float endpos[3] );
+void		gs_set_verbose( int level );		// 1: print Q3's messages, 2: also debug ones
+
+// --- players ---------------------------------------------------------------
 
 gs_env_t	*gs_env_new( void );
 void		gs_env_free( gs_env_t *env );
-void		gs_env_spawn( gs_env_t *env );			// at the map's spawn point
-void		gs_env_step( gs_env_t *env, const gs_cmd_t *cmd );
-// Put the player somewhere, like DeFRaG's placeplayer: origin, velocity and view yaw.
-// Timer, items and everything else are kept.
-void		gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw );
+void		gs_env_spawn( gs_env_t *env );		// (re)start at the map's spawn point
+void		gs_env_step( gs_env_t *env, const gs_cmd_t *cmd );	// one 8 ms frame
 void		gs_env_get_state( const gs_env_t *env, gs_state_t *out );
+// Put the player somewhere, like DeFRaG's placeplayer: origin, velocity and view yaw.
+// The timer, items and everything else are kept.
+void		gs_env_place( gs_env_t *env, const float origin[3], const float velocity[3], float yaw );
 
-// Whole-env snapshots, for start-state resets. Plain memory, safe to copy.
+// Whole-env snapshots, for restarting from a saved moment. Plain memory, safe to copy.
 size_t		gs_env_snapshot_size( void );
 void		gs_env_save( const gs_env_t *env, void *buf );
 void		gs_env_restore( gs_env_t *env, const void *buf );
 
-// Step envs[i] with cmds[i] for i < n, across nthreads worker threads (<= 1: inline).
+// Step envs[i] with cmds[i] for every i < n, spread over nthreads threads (the
+// caller is one of them; <= 1 steps them all on the calling thread). Results are
+// identical whatever the thread count.
 void		gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads );
-
-// World trace for observations: fraction along start->end for a box (mins/maxs may be NULL).
-float		gs_trace( const float start[3], const float end[3], const float mins[3],
-					  const float maxs[3], float endpos[3] );
 
 #ifdef __cplusplus
 }

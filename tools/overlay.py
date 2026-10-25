@@ -34,8 +34,9 @@ from gauntlet import env as genv, sim  # noqa: E402
 
 FONT_PATH = "/usr/share/fonts/TTF/MxPlus_IBM_VGA_9x16.ttf"   # int10h.org Oldschool PC fonts, CC BY-SA 4.0
 
-# colours: dark panels, amber for picks and numbers, soft green / red for signs
-PANEL = (28, 29, 32, 240)
+# colours: dark panels, amber for picks and numbers, soft green / red for signs.
+# Everything is opaque, so the panel looks the same over a bright sky or a dark hall.
+PANEL = (28, 29, 32, 255)
 EDGE_LIGHT, EDGE_DARK = (62, 63, 69, 255), (20, 21, 23, 255)
 TEXT, DIM = (201, 199, 191), (123, 121, 115)
 AMBER, GREEN, RED = (232, 176, 74), (127, 209, 139), (217, 118, 95)
@@ -64,14 +65,14 @@ def busiest(acts, k):
     return np.sort(np.argsort(-acts.std(axis=0))[:k])
 
 
-def mix(color, t, alpha=255):
-    """color at strength t (0..1), over the panel colour."""
+def mix(color, t):
+    """color at strength t (0..1), faded into the panel colour (opaque)."""
     t = float(np.clip(t, 0, 1))
-    return tuple(int(PANEL[i] + (color[i] - PANEL[i]) * t) for i in range(3)) + (alpha,)
+    return tuple(int(PANEL[i] + (color[i] - PANEL[i]) * t) for i in range(3)) + (255,)
 
 
-def signed(v, alpha=255):
-    return mix(GREEN if v >= 0 else RED, abs(v), alpha)
+def signed(v):
+    return mix(GREEN if v >= 0 else RED, abs(v))
 
 
 class Panel:
@@ -87,7 +88,7 @@ class Panel:
         self.sel1 = busiest(think["hidden1"], SHOWN)
         self.sel2 = busiest(think["hidden2"], SHOWN)
         # the real weights between the neurons that are drawn
-        self.w1 = agent["body.0.weight"].numpy()[self.sel1]                       # (24, 46)
+        self.w1 = agent["body.0.weight"].numpy()[self.sel1]                       # (24, inputs)
         self.w2 = agent["body.2.weight"].numpy()[np.ix_(self.sel2, self.sel1)]    # (24, 24)
         self.w3 = agent["policy.weight"].numpy()[:, self.sel2]                    # (19, 24)
         self.values = think["value"]
@@ -98,7 +99,8 @@ class Panel:
         self.pw, self.ph = int(324 * sx), int(500 * sy)
         top, bottom = self.y0 + 14, self.y0 + int(285 * sy)
         cols = [self.x0 + self.pw * f for f in (0.08, 0.37, 0.66, 0.92)]
-        self.inputs = [(cols[0], top + i * (bottom - top) / 45) for i in range(46)]
+        n_in = think["obs"].shape[1]
+        self.inputs = [(cols[0], top + i * (bottom - top) / (n_in - 1)) for i in range(n_in)]
         self.h1 = [(cols[1], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
         self.h2 = [(cols[2], top + 6 + i * (bottom - top - 12) / (SHOWN - 1)) for i in range(SHOWN)]
         # outputs: one column, a small gap between the four choices
@@ -150,8 +152,7 @@ class Panel:
                     strength = min(1.0, abs(signal[i]) / 1.5)
                     if strength > 0.05:
                         sx, sy = src_pts[i]
-                        d.line([(sx, sy), (dx, dy)],
-                               fill=signed(np.sign(signal[i]) * strength, int(60 + 150 * strength)))
+                        d.line([(sx, sy), (dx, dy)], fill=signed(np.sign(signal[i]) * (0.25 + 0.6 * strength)))
         links(self.inputs, obs, self.h1, self.w1)
         links(self.h1, h1, self.h2, self.w2)
         links(self.h2, h2, self.outputs, self.w3, k=2)

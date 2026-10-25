@@ -8,11 +8,15 @@ decision, and runs each decision's observation through the exact network version
 made it: the same numbers the network computed at the time. The result has the same
 format as tools/play_agent.py's, for tools/overlay.py:
 
-    <out>.think.npz     frame, obs, hidden1, hidden2, probs, action, value, version
+    <out>.think.npz     frame, obs, hidden1, hidden2, probs, action, value, version, known
     <out>.weights.pt    the network versions (overlay.py takes it as its agent)
     <out>.run           the run itself, checked against the replay
 
     .venv/bin/python tools/think_from_run.py runs/tatmt-s2/finish1/best_time -o build/runs/tatmt-s2_finish
+
+A run that restarted from a point seeded from an earlier training's run (train/ppo.py
+--seed-runs) begins with decisions whose network wasn't saved (version -1): those
+are marked unknown (known = 0), and the overlay leaves its panel empty there.
 """
 
 import argparse
@@ -49,9 +53,10 @@ def main():
     env = genv.VecEnv(run.map, 1, max_seconds=frames * sim.FRAME_MSEC / 1000 + 1, threads=1, stuck_seconds=None)
     obs = env.reset()
     agent, loaded = Agent(), None
-    record = {k: [] for k in ("obs", "hidden1", "hidden2", "probs", "action", "value", "version")}
+    record = {k: [] for k in ("obs", "hidden1", "hidden2", "probs", "action", "value", "version", "known")}
     for k, (action, version) in enumerate(zip(actions, versions)):
-        if version != loaded:
+        known = int(version) in weights
+        if known and version != loaded:
             agent.load_state_dict(weights[int(version)])
             loaded = version
         with torch.no_grad():
@@ -61,8 +66,10 @@ def main():
             logits = torch.split(agent.policy(h2), genv.ACTION_SIZES)
             probs = torch.cat([torch.softmax(l, -1) for l in logits])
             value = float(agent.value(h2))
+        if not known:       # no network to run: placeholders, marked unknown
+            h1, h2, probs, value = h1 * 0, h2 * 0, probs * 0, 0.0
         for key, v in (("obs", obs[0]), ("hidden1", h1.numpy()), ("hidden2", h2.numpy()), ("probs", probs.numpy()),
-                       ("action", action), ("value", value), ("version", int(version))):
+                       ("action", action), ("value", value), ("version", int(version)), ("known", known)):
             record[key].append(v)
         obs, _, done, info = env.step(action[None])
         if done[0] and k < len(actions) - 1:
@@ -81,8 +88,10 @@ def main():
                         **{k: np.array(v) for k, v in record.items()})
     shutil.copy(base.with_suffix(".weights.pt"), out.with_suffix(".weights.pt"))
     shutil.copy(base.with_suffix(".run"), out.with_suffix(".run"))
-    print(f"wrote {out.with_suffix('.think.npz')} ({len(actions)} decisions, "
-          f"{len(np.unique(versions))} network versions) and {out.with_suffix('.weights.pt')}")
+    unknown = int(np.sum(~np.isin(versions, list(weights))))
+    print(f"wrote {out.with_suffix('.think.npz')} ({len(actions)} decisions, {len(weights)} network versions"
+          + (f", the first {unknown} seeded from an earlier run without their network" if unknown else "")
+          + f") and {out.with_suffix('.weights.pt')}")
 
 
 if __name__ == "__main__":

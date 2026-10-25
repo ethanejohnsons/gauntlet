@@ -261,8 +261,11 @@ def main():
         run_frame = (game_time - base) // sim.FRAME_MSEC
         d_index = int(np.searchsorted(think["frame"], run_frame, side="right")) - 1
         img = Image.frombytes("RGB", (w, h), raw).convert("RGBA")
-        if d_index >= 0:
-            img.alpha_composite(panel.draw(min(d_index, len(think["frame"]) - 1)))
+        d_index = min(d_index, len(think["frame"]) - 1)
+        # (an empty panel before the first decision, and where the network that made a
+        # decision wasn't saved: see tools/think_from_run.py)
+        if d_index >= 0 and ("known" not in think or think["known"][d_index]):
+            img.alpha_composite(panel.draw(d_index))
         else:
             img.alpha_composite(panel.background)
         enc.stdin.write(img.convert("RGB").tobytes())

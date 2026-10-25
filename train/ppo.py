@@ -98,6 +98,9 @@ def parse_args():
     ap.add_argument("--init", help="start from this agent.pt instead of a fresh network")
     ap.add_argument("--restarts", type=float, default=0.25,
                     help="share of episodes that start from a remembered place instead of the spawn")
+    ap.add_argument("--seed-runs", nargs="*", default=[], metavar="RUN",
+                    help=".run files (whole runs from the spawn, e.g. an earlier training's best) to "
+                         "seed restart points from")
     ap.add_argument("--scouts", type=int,
                     help="players that never fire and aren't trained on; they find places to restart "
                          "from (default: 1 in 16 players)")
@@ -112,7 +115,9 @@ def save_run(path, run, decisions, versions):
     actions, used = decisions
     runfile.write(path.with_suffix(".run"), run)
     np.savez_compressed(path.with_suffix(".decisions.npz"), action=actions, version=used)
-    torch.save({int(v): versions[int(v)] for v in np.unique(used)}, path.with_suffix(".weights.pt"))
+    # (decisions seeded from an earlier training's runs have version -1: no network here)
+    torch.save({int(v): versions[int(v)] for v in np.unique(used) if int(v) in versions},
+               path.with_suffix(".weights.pt"))
 
 
 def main():
@@ -126,6 +131,9 @@ def main():
 
     env = VecEnv(args.map, args.envs, max_seconds=args.max_seconds, threads=args.threads,
                  restart_fraction=args.restarts, scouts=args.scouts)
+    if args.seed_runs:
+        cells = env.seed_restarts([runfile.read(p) for p in args.seed_runs])
+        print(f"seeded {cells} restart points from {len(args.seed_runs)} runs")
     agent = Agent().to(device)
     if args.init:
         agent.load_state_dict(torch.load(args.init, map_location=device))

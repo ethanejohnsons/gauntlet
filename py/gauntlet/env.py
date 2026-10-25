@@ -29,8 +29,8 @@ network version that made it (set `version`), so the network's exact thinking du
 any episode can be rebuilt afterwards (tools/think_from_run.py).
 
 Restart points (as in Go-Explore): the env remembers a snapshot of the places
-players reach, one per cell (a leg, a slice of the run's progress, and what the
-player carries: the rocket launcher, rockets). With restart_fraction > 0, that share
+players reach, one per cell (a leg, a slice of the run's progress, a band of speed,
+and what the player carries: the rocket launcher, rockets). With restart_fraction > 0, that share
 of episodes starts from a remembered cell instead of the spawn, cells few episodes
 have reached first. This matters on maps where a mistake shows only much later: on
 tatmt-s2 the map hands out one rocket, which the last jump needs, and a player who
@@ -100,7 +100,8 @@ CHECKPOINT_RADIUS = 8       # route distance at which a checkpoint zone counts a
 STUCK_SECONDS = 10          # an episode ends after this long without getting a route cell
                             # (16 units) closer to the current zone
 
-PROGRESS_CELLS = 100        # restart cells: slices of the run's progress per leg
+PROGRESS_CELLS = 100        # restart cells: slices of the run's progress per leg,
+SPEED_STEP, SPEED_CELLS = 200, 6   # and bands of speed (ups; the last is 1000 and up)
 AMMO_RESTARTS = 0.5         # share of learner restarts that get back fired rockets
 
 # a remembered place to restart from: the env, and the episode so far (held: the most
@@ -240,13 +241,15 @@ class VecEnv:
         return set(np.unique(np.concatenate(used)).tolist()) if used else set()
 
     def _cells(self, indices):
-        """The restart cell each player is in: leg, progress slice, and what it carries."""
+        """The restart cell each player is in: leg, progress slice, speed band, and what it
+        carries (the last 3 bits: rockets, up to 3, and the rocket launcher)."""
         s = self.states[indices]
         progress = (self._progress(self._leg_route(self.route[indices], self.leg[indices]), self.leg[indices])
                     * PROGRESS_CELLS).astype(np.int64)
         has_rl = (s["weapons"] >> sim.WP_ROCKET_LAUNCHER) & 1
         carry = np.minimum(s["rockets"], 3) * 2 + has_rl
-        return (self.leg[indices] * (PROGRESS_CELLS + 1) + progress) * 8 + carry
+        speed = np.minimum(np.hypot(s["velocity"][:, 0], s["velocity"][:, 1]) // SPEED_STEP, SPEED_CELLS - 1)
+        return ((self.leg[indices] * (PROGRESS_CELLS + 1) + progress) * SPEED_CELLS + speed.astype(np.int64)) * 8 + carry
 
     def _remember(self, indices):
         """Count each player's cell if its episode is new there, and remember the cell
@@ -317,6 +320,44 @@ class VecEnv:
         self.from_spawn[indices] = ~restart
         self.closest[indices] = np.inf
         self.closer_frame[indices] = self.frames[indices]
+
+    def seed_restarts(self, runs):
+        """Remember restart points along saved runs (whole runs from the spawn, like an
+        earlier training's best), as if a player had just played them: so training can
+        restart from places those runs reached, at the speed they had there. Their
+        decisions are recovered from the inputs; the network that made them is unknown
+        (version -1)."""
+        player = VecEnv(self.map, 1, max_seconds=self.max_frames * sim.FRAME_MSEC / 1000, threads=1,
+                        restart_fraction=1e-9, stuck_seconds=None)
+        player.version = -1
+        for run in runs:
+            player.reset()
+            frames = np.array(run.frames[SETTLE_FRAMES:], np.int64)
+            for k in range(len(frames) // FRAMES_PER_ACTION):
+                action = player._action_for(frames[k * FRAMES_PER_ACTION:(k + 1) * FRAMES_PER_ACTION])
+                if action is None:
+                    raise ValueError(f"decision {k} of a seed run isn't one of this env's actions")
+                if player.step(action[None])[2][0]:
+                    break
+        for cell, kept in player.restarts.items():
+            if cell not in self.restarts or kept.frames < self.restarts[cell].frames:
+                self.restarts[cell] = kept
+        return len(player.restarts)
+
+    def _action_for(self, frames):
+        """The action (a row for step) that makes player 0 play these 4 frames of input, or None."""
+        f = frames[0]
+        delta = self.states["delta_angles"][0]
+        pitch = np.nonzero((((PITCHES * 65536 / 360).astype(np.int64) - delta[0]) & 65535) == f[0])[0]
+        for turn, rate in enumerate(TURN_RATES):
+            # the yaw as step() works it out: added up frame by frame
+            yaw, angles = np.float64(self.states["viewangles"][0, 1]), []
+            for _ in range(FRAMES_PER_ACTION):
+                yaw += rate
+                angles.append((int(yaw * 65536 / 360) - int(delta[1])) & 65535)
+            if angles == list(frames[:, 1]) and len(pitch):
+                return np.array([f[3] // 127 + 1, f[4] // 127 + 1, f[5] // 127, turn, int(f[6] != 0), pitch[0]])
+        return None
 
     def reset(self):
         self._restart(np.arange(self.n))

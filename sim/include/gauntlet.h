@@ -197,6 +197,27 @@ void		gs_step_batch( gs_env_t **envs, const gs_cmd_t *cmds, int n, int nthreads 
 void		gs_observe_batch( gs_env_t **envs, int n, int nthreads, float *obs,
 							  gs_state_t *states, float *route_dist );
 
+// One decision of a player, for gs_decide_batch: the keys it holds for all its frames,
+// and the turn rate and view pitch each frame's angles are worked out from, the same
+// way py/gauntlet/env.py does it (yaw added up in double precision, pitch in float).
+typedef struct {
+	int8_t	forward, right, up;
+	uint8_t	buttons;
+	uint8_t	weapon;
+	uint8_t	unused[3];
+	float	turn;			// degrees of yaw per frame
+	float	pitch;			// view pitch, degrees (down is positive)
+} gs_decision_t;
+
+// Play one decision for envs[i], for every i < n, in parallel: `frames` frames of
+// decisions[i] (the cmds played go to cmds_out[i * frames + f], if not NULL), then
+// observe as gs_observe_batch. The same as building those cmds and calling
+// gs_step_batch once per frame and gs_observe_batch after, with one hand-off to the
+// threads instead of frames + 1.
+void		gs_decide_batch( gs_env_t **envs, const gs_decision_t *decisions, int n, int frames,
+							 int nthreads, gs_cmd_t *cmds_out, float *obs, gs_state_t *states,
+							 float *route_dist );
+
 #ifdef __cplusplus
 }
 #endif

@@ -74,9 +74,11 @@ SETTLE_FRAMES = 125                           # standing still after spawning, a
 
 OBS_SIZE = 52                                 # GS_OBS_SIZE in gauntlet.h
 
-# numpy views of gs_cmd_t and gs_state_t (sim/include/gauntlet.h)
+# numpy views of gs_cmd_t, gs_decision_t and gs_state_t (sim/include/gauntlet.h)
 CMD_DTYPE = np.dtype([("angles", np.int32, 3), ("forward", np.int8), ("right", np.int8),
                       ("up", np.int8), ("buttons", np.uint8), ("weapon", np.uint8), ("unused", np.uint8, 3)])
+DECISION_DTYPE = np.dtype([("forward", np.int8), ("right", np.int8), ("up", np.int8), ("buttons", np.uint8),
+                           ("weapon", np.uint8), ("unused", np.uint8, 3), ("turn", np.float32), ("pitch", np.float32)])
 STATE_DTYPE = np.dtype([(name, np.float32 if t._type_ is C.c_float else np.int32, t._length_)
                         if hasattr(t, "_length_") else (name, np.int32)
                         for name, t in sim.State._fields_])
@@ -128,6 +130,8 @@ class VecEnv:
         L = self.lib = sim.lib()
         L.gs_step_batch.argtypes = [C.c_void_p, C.c_void_p, C.c_int, C.c_int]
         L.gs_observe_batch.argtypes = [C.c_void_p, C.c_int, C.c_int, C.c_void_p, C.c_void_p, C.c_void_p]
+        L.gs_decide_batch.argtypes = [C.c_void_p, C.c_void_p, C.c_int, C.c_int, C.c_int,
+                                      C.c_void_p, C.c_void_p, C.c_void_p, C.c_void_p]
         L.gs_env_snapshot_size.restype = C.c_size_t
         L.gs_env_save.argtypes = [C.c_void_p, C.c_void_p]
         L.gs_env_restore.argtypes = [C.c_void_p, C.c_void_p]
@@ -158,7 +162,8 @@ class VecEnv:
 
         self.envs = [L.gs_env_new() for _ in range(self.n)]
         self.env_ptrs = (C.c_void_p * self.n)(*self.envs)
-        self.cmds = np.zeros(self.n, CMD_DTYPE)
+        self.choices = np.zeros(self.n, DECISION_DTYPE)                   # this decision, for the sim
+        self.frame_cmds = np.zeros((self.n, FRAMES_PER_ACTION), CMD_DTYPE)  # the frames it played
         self.obs = np.zeros((self.n, OBS_SIZE), np.float32)
         self.states = np.zeros(self.n, STATE_DTYPE)
         self.route = np.zeros(self.n, np.float32)       # distance to the current leg's zone
@@ -378,33 +383,28 @@ class VecEnv:
         prev_route = self.route.copy()
         prev_timer = self.states["timer_state"].copy()
         prev_rockets = self.states["rockets"].copy()
-        yaw = self.states["viewangles"][:, 1].astype(np.float64)
-        delta = self.states["delta_angles"]
         has_rl = (self.states["weapons"] & (1 << sim.WP_ROCKET_LAUNCHER)) != 0
-        self.cmds["forward"] = forward
-        self.cmds["right"] = side
-        self.cmds["up"] = jump
-        self.cmds["buttons"] = fire
-        self.cmds["weapon"] = np.where(has_rl, sim.WP_ROCKET_LAUNCHER, 0)
-        self.cmds["angles"][:, 0] = ((pitch * 65536 / 360).astype(np.int64) - delta[:, 0]) & 65535
         everyone = np.arange(self.n)
         played = actions.copy()
         played[self.scout, 4] = 0
         self.decisions[everyone, self.frames // FRAMES_PER_ACTION] = played
         self.decision_versions[everyone, self.frames // FRAMES_PER_ACTION] = self.version
-        for _ in range(FRAMES_PER_ACTION):
-            yaw += turn
-            self.cmds["angles"][:, 1] = ((yaw * 65536 / 360).astype(np.int64) - delta[:, 1]) & 65535
-            # remember this frame's input (episodes end before the history is full)
-            self.history[everyone, self.frames, 0:3] = self.cmds["angles"]
-            self.history[everyone, self.frames, 3] = forward
-            self.history[everyone, self.frames, 4] = side
-            self.history[everyone, self.frames, 5] = jump
-            self.history[everyone, self.frames, 6] = fire
-            self.history[everyone, self.frames, 7] = self.cmds["weapon"]
-            self.frames += 1
-            self.lib.gs_step_batch(self.env_ptrs, _ptr(self.cmds), self.n, self.threads)
-        self._observe()
+
+        # play the decision's frames and observe, all in the sim: each frame turns the
+        # view by `turn` (the yaw added up in double precision) and looks at `pitch`
+        c = self.choices
+        c["forward"], c["right"], c["up"], c["buttons"] = forward, side, jump, fire
+        c["weapon"] = np.where(has_rl, sim.WP_ROCKET_LAUNCHER, 0)
+        c["turn"], c["pitch"] = turn, pitch
+        self.lib.gs_decide_batch(self.env_ptrs, _ptr(c), self.n, FRAMES_PER_ACTION, self.threads,
+                                 _ptr(self.frame_cmds), _ptr(self.obs), _ptr(self.states), _ptr(self.route))
+        # remember the frames' input (episodes end before the history is full)
+        rows = self.frames[:, None] + np.arange(FRAMES_PER_ACTION)
+        f = self.frame_cmds
+        self.history[everyone[:, None], rows] = np.stack(
+            [f["angles"][..., 0], f["angles"][..., 1], f["angles"][..., 2], f["forward"], f["right"],
+             f["up"], f["buttons"], f["weapon"]], axis=-1)
+        self.frames += FRAMES_PER_ACTION
         self.held = np.maximum(self.held, self.states["rockets"])
 
         timer = self.states["timer_state"]

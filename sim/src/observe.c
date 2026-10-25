@@ -113,3 +113,42 @@ void gs_observe_batch( gs_env_t **envs, int n, int nthreads, float *obs, gs_stat
 	observeJob_t job = { envs, obs, states, route_dist };
 	GS_ParallelFor( n, nthreads, ObserveOne, &job );
 }
+
+typedef struct {
+	const gs_decision_t	*decisions;
+	int					frames;
+	gs_cmd_t			*cmdsOut;
+	observeJob_t		observe;
+} decideJob_t;
+
+static void DecideOne( int i, void *ctx ) {
+	decideJob_t *job = ctx;
+	gs_env_t *env = job->observe.envs[i];
+	const gs_decision_t *d = &job->decisions[i];
+	gs_cmd_t cmd = { { 0 } };
+	// the view at the start of the decision, as the env's last observed state has it
+	double yaw = env->ps.viewangles[YAW];
+	int32_t deltaPitch = env->ps.delta_angles[PITCH], deltaYaw = env->ps.delta_angles[YAW];
+
+	cmd.forward = d->forward;
+	cmd.right = d->right;
+	cmd.up = d->up;
+	cmd.buttons = d->buttons;
+	cmd.weapon = d->weapon;
+	cmd.angles[PITCH] = (int32_t)( ( (int64_t)( d->pitch * 65536.0f / 360.0f ) - deltaPitch ) & 65535 );
+	for ( int f = 0; f < job->frames; f++ ) {
+		yaw += d->turn;
+		cmd.angles[YAW] = (int32_t)( ( (int64_t)( yaw * 65536.0 / 360.0 ) - deltaYaw ) & 65535 );
+		if ( job->cmdsOut ) {
+			job->cmdsOut[ i * job->frames + f ] = cmd;
+		}
+		gs_env_step( env, &cmd );
+	}
+	ObserveOne( i, &job->observe );
+}
+
+void gs_decide_batch( gs_env_t **envs, const gs_decision_t *decisions, int n, int frames, int nthreads,
+					  gs_cmd_t *cmds_out, float *obs, gs_state_t *states, float *route_dist ) {
+	decideJob_t job = { decisions, frames, cmds_out, { envs, obs, states, route_dist } };
+	GS_ParallelFor( n, nthreads, DecideOne, &job );
+}

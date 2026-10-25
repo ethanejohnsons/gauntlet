@@ -7,10 +7,14 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# Float behavior must match the engine build (oDFe on Linux: -O2, no fast-math, no FMA).
-# Never add -march=native or -ffast-math here: FMA contraction changes results.
+# Float behavior must match the engine build (oDFe on Linux: no fast-math, no FMA).
+# -ffp-contract=off is what keeps FMA out: with it, code for this CPU (-march=native)
+# and link-time optimization give bit-identical results, just faster (checked against
+# the engine with tools/compare_run.py). Never add -ffast-math, and never drop
+# -ffp-contract=off.
 set(GS_FLOAT_FLAGS -ffp-contract=off -fno-fast-math -msse2 -mfpmath=sse)
-set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native -fno-semantic-interposition -DNDEBUG")
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)

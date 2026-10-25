@@ -183,6 +183,7 @@ class VecEnv:
         # each player's episode has been in
         self.restart_fraction = restart_fraction
         self.seen = [set() for _ in range(self.n)]
+        self.cell = np.full(self.n, -1, np.int64)      # each player's cell at its last decision
         self.scout = np.arange(self.n) >= self.n - scouts
         self.restarts = {}
         self.practice_restarts = {}                    # remembered by practice episodes
@@ -201,9 +202,18 @@ class VecEnv:
         done_so_far = self.leg_starts[leg + 1] - route
         return np.clip(done_so_far / self.start_route, 0, 1)
 
-    def _observe(self):
-        self.lib.gs_observe_batch(self.env_ptrs, self.n, self.threads, _ptr(self.obs),
-                                  _ptr(self.states), _ptr(self.route))
+    def _observe(self, indices=None):
+        """Fill obs, states and route for every player, or just for some."""
+        if indices is None:
+            self.lib.gs_observe_batch(self.env_ptrs, self.n, self.threads, _ptr(self.obs),
+                                      _ptr(self.states), _ptr(self.route))
+            return
+        ptrs = (C.c_void_p * len(indices))(*[self.envs[i] for i in indices])
+        obs = np.zeros((len(indices), OBS_SIZE), np.float32)
+        states = np.zeros(len(indices), STATE_DTYPE)
+        route = np.zeros(len(indices), np.float32)
+        self.lib.gs_observe_batch(ptrs, len(indices), self.threads, _ptr(obs), _ptr(states), _ptr(route))
+        self.obs[indices], self.states[indices], self.route[indices] = obs, states, route
 
     def _set_leg(self, i, leg):
         self.leg[i] = leg
@@ -235,9 +245,12 @@ class VecEnv:
 
     def _remember(self, indices):
         """Count each player's cell if its episode is new there, and remember the cell
-        if this is the fastest anyone has got there."""
+        if this is the fastest anyone has got there. Only players that just entered a
+        cell can change anything: staying in one, a player only gets later."""
         cells = self._cells(indices)
-        for i, cell in zip(indices, cells):
+        entered = cells != self.cell[indices]
+        self.cell[indices] = cells
+        for i, cell in zip(indices[entered], cells[entered]):
             visits = self.scout_visits if self.scout[i] else self.practice_visits if self.synthetic[i] else self.visits
             if cell not in self.seen[i]:
                 self.seen[i].add(cell)
@@ -272,6 +285,7 @@ class VecEnv:
                 chosen = self.rng.choice(len(cells), size=group.sum(), p=weight / weight.sum())
                 picks.update(zip(indices[group], (cells[c] for c in chosen)))
         self.synthetic[indices] = False
+        self.cell[indices] = -1
         for k, i in enumerate(indices):
             self.seen[i] = set()
             if restart[k]:
@@ -410,7 +424,7 @@ class VecEnv:
             info["runs"] = {i: self.history[i, :self.frames[i]].copy() for i in ended}
             info["decisions"] = {i: self._decisions_of(i) for i in ended}
             self._restart(ended)
-            self._observe()
+            self._observe(ended)
         return self.obs.copy(), reward.astype(np.float32), done, info
 
     def make_run(self, frames):

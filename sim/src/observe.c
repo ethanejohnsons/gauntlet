@@ -39,7 +39,7 @@ static int RouteTarget( const gs_env_t *env ) {
 
 static void Observe( const gs_env_t *env, float *o ) {
 	const playerState_t *ps = &env->ps;
-	vec3_t forward, left, dir, ahead, rel;
+	vec3_t forward, left, dir, ahead[4], rel;
 	int k = 0;
 
 	YawAxes( ps->viewangles[YAW], forward, left );
@@ -69,9 +69,10 @@ static void Observe( const gs_env_t *env, float *o ) {
 	o[k++] = Feeler( ps->origin, dir );
 
 	// the route ahead
+	int found = GS_RouteAheadMany( RouteTarget( env ), ps->origin, routeAhead, 4, ahead ) == 0;
 	for ( int i = 0; i < 4; i++ ) {
-		if ( gs_route_ahead( RouteTarget( env ), ps->origin, routeAhead[i], ahead ) == 0 ) {
-			VectorSubtract( ahead, ps->origin, rel );
+		if ( found ) {
+			VectorSubtract( ahead[i], ps->origin, rel );
 			ToPlayerFrame( rel, forward, left, 512, &o[k] );
 		} else {
 			o[k] = o[k + 1] = o[k + 2] = 0;

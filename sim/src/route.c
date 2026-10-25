@@ -69,11 +69,19 @@ static void CellCenter( int index, vec3_t out ) {
 // it, or -1. Used where a point sits in or right next to a wall at grid resolution: a
 // teleport destination just above the floor, or a player brushing a wall.
 static int NearestOpenCell( const float *dist, const vec3_t pos, int radius ) {
-	int c[3], best = -1;
+	int c[3], best = -1, inside = 1;
 	float bestDist = 1e30f;
 	vec3_t center;
 	for ( int i = 0; i < 3; i++ ) {
-		c[i] = (int)floorf( ( pos[i] - route.origin[i] ) / route.cell );
+		float g = ( pos[i] - route.origin[i] ) / route.cell;
+		c[i] = (int)floorf( g );
+		inside &= g - c[i] > 0.01f && g - c[i] < 0.99f;
+	}
+	// The usual case: pos is well inside an open cell (not within a rounding error of a
+	// face, where a neighbour's center can be as near), whose center is then nearer than
+	// any other cell's: the search below would find the same cell.
+	if ( inside && InGrid( c[0], c[1], c[2] ) && dist[ CellIndex( c[0], c[1], c[2] ) ] >= 0 ) {
+		return CellIndex( c[0], c[1], c[2] );
 	}
 	for ( int z = c[2] - radius; z <= c[2] + radius; z++ ) {
 		for ( int y = c[1] - radius; y <= c[1] + radius; y++ ) {
@@ -472,6 +480,12 @@ float gs_route_distance( int target, const float pos[3] ) {
 }
 
 int gs_route_ahead( int target, const float pos[3], float ahead, float out[3] ) {
+	return GS_RouteAheadMany( target, pos, &ahead, 1, (vec3_t *)out );
+}
+
+// gs_route_ahead for several distances (in increasing order) from one walk, which is
+// cheaper than walking from pos for each: out[i] is the point ahead[i] further along.
+int GS_RouteAheadMany( int target, const vec3_t pos, const float *ahead, int count, vec3_t *out ) {
 	if ( !route.built || target < 0 || target >= route.numTargets ) {
 		return -1;
 	}
@@ -483,7 +497,14 @@ int gs_route_ahead( int target, const float pos[3], float ahead, float out[3] ) 
 		return -1;
 	}
 	float walked = 0;
-	while ( walked < ahead && dist[cell] > 0 ) {
+	int done = 0;
+	while ( done < count ) {
+		while ( done < count && walked >= ahead[done] ) {
+			CellCenter( cell, out[done++] );
+		}
+		if ( done == count || dist[cell] <= 0 ) {
+			break;
+		}
 		int c[3], next = -1;
 		float nextDist = dist[cell];
 		CellCoords( cell, c );
@@ -507,6 +528,8 @@ int gs_route_ahead( int target, const float pos[3], float ahead, float out[3] ) 
 		walked += dist[cell] - nextDist;
 		cell = next;
 	}
-	CellCenter( cell, out );
+	while ( done < count ) {
+		CellCenter( cell, out[done++] );	// the route ended (the target, or a teleport) first
+	}
 	return 0;
 }

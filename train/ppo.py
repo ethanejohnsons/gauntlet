@@ -60,20 +60,19 @@ class Agent(nn.Module):
         nn.init.orthogonal_(self.policy.weight, 0.01)
         nn.init.zeros_(self.policy.bias)
 
-    def dists(self, h):
-        """One categorical distribution per choice (forward, side, jump, turn)."""
-        logits = torch.split(self.policy(h), ACTION_SIZES, dim=-1)
-        return [torch.distributions.Categorical(logits=l) for l in logits]
-
     def act(self, obs, actions=None):
         """Sample actions (or score given ones). Returns actions, their log-probability,
-        the entropy (how undecided the policy is) and the value estimate."""
+        the entropy (how undecided the policy is) and the value estimate.
+
+        Each choice (forward, side, jump, turn, fire, aim) is a categorical
+        distribution over its options, worked out by hand: torch.distributions does the
+        same but spends most of its time checking arguments."""
         h = self.body(obs)
-        dists = self.dists(h)
+        log_probs = [torch.log_softmax(l, dim=-1) for l in torch.split(self.policy(h), ACTION_SIZES, dim=-1)]
         if actions is None:
-            actions = torch.stack([d.sample() for d in dists], dim=-1)
-        logp = sum(d.log_prob(actions[..., i]) for i, d in enumerate(dists))
-        entropy = sum(d.entropy() for d in dists)
+            actions = torch.stack([torch.multinomial(lp.exp(), 1).squeeze(-1) for lp in log_probs], dim=-1)
+        logp = sum(lp.gather(-1, actions[..., i, None]).squeeze(-1) for i, lp in enumerate(log_probs))
+        entropy = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs)
         return actions, logp, entropy, self.value(h).squeeze(-1)
 
 
@@ -167,9 +166,9 @@ def main():
                 actions, logp, _, value = agent.act(obs)
             next_obs, reward, done, info = env.step(actions.cpu().numpy())
             obs_buf[t], act_buf[t], logp_buf[t], val_buf[t] = obs, actions, logp, value
-            rew_buf[t] = torch.tensor(reward, device=device)
-            done_buf[t] = torch.tensor(done, device=device, dtype=torch.float32)
-            obs = torch.tensor(next_obs, device=device)
+            rew_buf[t] = torch.from_numpy(reward).to(device)
+            done_buf[t] = torch.from_numpy(done).to(device)
+            obs = torch.from_numpy(next_obs).to(device)
             decisions += N
 
             if info:

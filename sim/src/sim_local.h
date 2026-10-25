@@ -158,6 +158,9 @@ struct gs_env {
 // run fn( i, ctx ) for every i < n, spread over nthreads threads
 void	GS_ParallelFor( int n, int nthreads, void ( *fn )( int i, void *ctx ), void *ctx );
 
+// gs_route_ahead for several distances at once (route.c)
+int		GS_RouteAheadMany( int target, const vec3_t pos, const float *ahead, int count, vec3_t *out );
+
 // ---------------------------------------------------------------------------
 // game logic (game.c)
 

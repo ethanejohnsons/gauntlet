@@ -27,7 +27,10 @@ was thinking during it, for tools/overlay.py.
 """
 
 import argparse
+import contextlib
+import copy
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -42,6 +45,8 @@ sys.path.insert(0, str(ROOT / "py"))
 from gauntlet import runfile  # noqa: E402
 from gauntlet.env import ACTION_SIZES, OBS_SIZE, VecEnv  # noqa: E402
 
+
+IS_CAP = 2.0    # the most a decision's weight can be, for decisions the actor made unlikely
 
 # ---------------------------------------------------------------------------
 # The network: observation in, a probability for every choice out, plus a guess
@@ -59,20 +64,30 @@ class Agent(nn.Module):
         # start out undecided: all choices about equally likely
         nn.init.orthogonal_(self.policy.weight, 0.01)
         nn.init.zeros_(self.policy.bias)
+        # where each policy output goes in a (choices, options) grid; unused slots are -inf
+        self.register_buffer("rows", torch.tensor([c for c, n in enumerate(ACTION_SIZES) for _ in range(n)]), False)
+        self.register_buffer("cols", torch.tensor([k for n in ACTION_SIZES for k in range(n)]), False)
 
     def act(self, obs, actions=None):
         """Sample actions (or score given ones). Returns actions, their log-probability,
         the entropy (how undecided the policy is) and the value estimate.
 
         Each choice (forward, side, jump, turn, fire, aim) is a categorical
-        distribution over its options, worked out by hand: torch.distributions does the
-        same but spends most of its time checking arguments."""
+        distribution over its options. All six are worked out at once, as rows of one
+        grid padded with -inf, and sampled with the Gumbel-max trick: a handful of GPU
+        operations instead of a few per choice (deciding is on the critical path of
+        every step)."""
         h = self.body(obs)
-        log_probs = [torch.log_softmax(l, dim=-1) for l in torch.split(self.policy(h), ACTION_SIZES, dim=-1)]
+        grid = torch.full((obs.shape[0], len(ACTION_SIZES), max(ACTION_SIZES)), float("-inf"), device=obs.device)
+        grid[:, self.rows, self.cols] = self.policy(h)
+        log_probs = torch.log_softmax(grid, dim=-1)
         if actions is None:
-            actions = torch.stack([torch.multinomial(lp.exp(), 1).squeeze(-1) for lp in log_probs], dim=-1)
-        logp = sum(lp.gather(-1, actions[..., i, None]).squeeze(-1) for i, lp in enumerate(log_probs))
-        entropy = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs)
+            gumbel = -torch.log(-torch.log(torch.rand_like(log_probs)))
+            actions = torch.argmax(log_probs + gumbel, dim=-1)
+        logp = log_probs.gather(-1, actions[..., None]).squeeze(-1).sum(-1)
+        # (the padding's log-probabilities are -inf: zero them first, as 0 * -inf would
+        # make the gradients NaN)
+        entropy = -(log_probs.exp() * log_probs.masked_fill(grid == float("-inf"), 0)).sum((-2, -1))
         return actions, logp, entropy, self.value(h).squeeze(-1)
 
 
@@ -141,14 +156,72 @@ def main():
     print(f"{args.map}: route from spawn to finish is {env.start_route:.0f} units; "
           f"{args.envs} players on {device}; writing to {out.relative_to(ROOT)}")
 
-    # rollout storage: one row per decision, one column per player
+    # Playing and learning overlap: while the sim plays the next rollout with `actor`
+    # (a copy of the network), `agent` learns from the last one in a background thread,
+    # on its own GPU stream. So the CPU and the GPU don't take turns waiting for each
+    # other. After each rollout the actor takes the agent's latest weights: a rollout
+    # is played by the network from one update back. Learning allows for that as
+    # "decoupled" PPO does: the clipping keeps the agent near where it was when it
+    # started on the rollout, and each decision is weighted by how much more (or less)
+    # likely that network was to make it than the actor (capped at IS_CAP).
+    actor = copy.deepcopy(agent)
+    learn_stream = torch.cuda.Stream() if device.type == "cuda" else None
+    learning, stats = None, {}
+
+    # rollout storage, two sets (one being played into, one being learned from): one
+    # row per decision, one column per player
     T, N = args.rollout, args.envs
-    obs_buf = torch.zeros((T, N, OBS_SIZE), device=device)
-    act_buf = torch.zeros((T, N, len(ACTION_SIZES)), dtype=torch.long, device=device)
-    logp_buf = torch.zeros((T, N), device=device)
-    rew_buf = torch.zeros((T, N), device=device)
-    done_buf = torch.zeros((T, N), device=device)
-    val_buf = torch.zeros((T, N), device=device)
+    def rollout_buffers():
+        return {"obs": torch.zeros((T, N, OBS_SIZE), device=device),
+                "act": torch.zeros((T, N, len(ACTION_SIZES)), dtype=torch.long, device=device),
+                **{k: torch.zeros((T, N), device=device) for k in ("logp", "rew", "done", "val")}}
+    buffers = [rollout_buffers(), rollout_buffers()]
+
+    def learn(buf, next_value):
+        """Score a rollout's decisions and learn from them (runs in the background)."""
+        with torch.cuda.stream(learn_stream) if learn_stream else contextlib.nullcontext():
+            # --- 2. score: how much better than expected was each decision? --
+            # GAE (generalized advantage estimation): for each decision, the rewards
+            # that followed it, discounted, minus what the value head expected.
+            with torch.no_grad():
+                advantages = torch.zeros_like(buf["rew"])
+                running = torch.zeros(N, device=device)
+                for t in reversed(range(T)):
+                    not_done = 1 - buf["done"][t]
+                    following = next_value if t == T - 1 else buf["val"][t + 1]
+                    delta = buf["rew"][t] + args.gamma * following * not_done - buf["val"][t]
+                    running = delta + args.gamma * args.gae_lambda * not_done * running
+                    advantages[t] = running
+                returns = advantages + buf["val"]
+
+            # --- 3. learn: a few passes of small, clipped updates ------------
+            # (on the learners only: scouts, the last columns, don't play by the policy)
+            L = N - args.scouts
+            b_obs, b_act = buf["obs"][:, :L].reshape(-1, OBS_SIZE), buf["act"][:, :L].reshape(-1, len(ACTION_SIZES))
+            b_logp, b_adv, b_ret = buf["logp"][:, :L].reshape(-1), advantages[:, :L].reshape(-1), returns[:, :L].reshape(-1)
+            batch = T * L
+            mb = batch // args.minibatches
+            # the agent as it starts on this rollout ("proximal"), and how much more
+            # likely it was than the actor to make each decision
+            with torch.no_grad():
+                b_prox = torch.cat([agent.act(b_obs[s:s + mb], b_act[s:s + mb])[1] for s in range(0, batch, mb)])
+                b_weight = (b_prox - b_logp).exp().clamp(max=IS_CAP)
+            for _ in range(args.epochs):
+                order = torch.randperm(batch, device=device)
+                for s in range(0, batch, mb):
+                    idx = order[s:s + mb]
+                    _, logp, entropy, value = agent.act(b_obs[idx], b_act[idx])
+                    ratio = (logp - b_prox[idx]).exp()             # new probability / proximal
+                    adv = (b_adv[idx] - b_adv[idx].mean()) / (b_adv[idx].std() + 1e-8) * b_weight[idx]
+                    # the clipped PPO objective: follow the advantage, but not too far
+                    policy_loss = -torch.min(ratio * adv, ratio.clamp(1 - args.clip, 1 + args.clip) * adv).mean()
+                    value_loss = 0.5 * (value - b_ret[idx]).pow(2).mean()
+                    loss = policy_loss + 0.5 * value_loss - args.entropy * entropy.mean()
+                    optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
+                    optimizer.step()
+            stats.update(policy=policy_loss.item(), value=value_loss.item(), entropy=entropy.mean().item())
 
     obs = torch.tensor(env.reset(), device=device)
     best_progress, best_time = 0.0, None
@@ -161,21 +234,22 @@ def main():
         update += 1
         # this rollout's network version: kept while a running episode or a restart
         # point has a decision it made, so best runs can be saved with their weights
-        versions[update] = {k: v.detach().cpu().clone() for k, v in agent.state_dict().items()}
+        versions[update] = {k: v.detach().cpu().clone() for k, v in actor.state_dict().items()}
         env.version = update
         if update % 20 == 0:
             in_use = env.versions_in_use() | {update}
             versions = {v: w for v, w in versions.items() if v in in_use}
 
         # --- 1. play: collect a rollout -------------------------------------
+        buf = buffers[update % 2]
         ended_progress, ended_returns, ended_finished = [], [], []
         for t in range(T):
             with torch.no_grad():
-                actions, logp, _, value = agent.act(obs)
+                actions, logp, _, value = actor.act(obs)
             next_obs, reward, done, info = env.step(actions.cpu().numpy())
-            obs_buf[t], act_buf[t], logp_buf[t], val_buf[t] = obs, actions, logp, value
-            rew_buf[t] = torch.from_numpy(reward).to(device)
-            done_buf[t] = torch.from_numpy(done).to(device)
+            buf["obs"][t], buf["act"][t], buf["logp"][t], buf["val"][t] = obs, actions, logp, value
+            buf["rew"][t] = torch.from_numpy(reward).to(device)
+            buf["done"][t] = torch.from_numpy(done).to(device)
             obs = torch.from_numpy(next_obs).to(device)
             decisions += N
 
@@ -199,51 +273,26 @@ def main():
                     if info["progress"][k] > best_progress + 0.01:
                         best_progress = float(info["progress"][k])
                         save_run(out / "best_progress", env.make_run(info["runs"][i]), info["decisions"][i], versions)
-
-        # --- 2. score: how much better than expected was each decision? ------
-        # GAE (generalized advantage estimation): for each decision, the rewards
-        # that followed it, discounted, minus what the value head expected.
         with torch.no_grad():
-            _, _, _, next_value = agent.act(obs)
-            advantages = torch.zeros_like(rew_buf)
-            running = torch.zeros(N, device=device)
-            for t in reversed(range(T)):
-                not_done = 1 - done_buf[t]
-                following = next_value if t == T - 1 else val_buf[t + 1]
-                delta = rew_buf[t] + args.gamma * following * not_done - val_buf[t]
-                running = delta + args.gamma * args.gae_lambda * not_done * running
-                advantages[t] = running
-            returns = advantages + val_buf
+            next_value = actor.act(obs)[3]
 
-        # --- 3. learn: a few passes of small, clipped updates ----------------
-        # (on the learners only: scouts, the last columns, don't play by the policy)
-        L = N - args.scouts
-        b_obs, b_act = obs_buf[:, :L].reshape(-1, OBS_SIZE), act_buf[:, :L].reshape(-1, len(ACTION_SIZES))
-        b_logp, b_adv, b_ret = logp_buf[:, :L].reshape(-1), advantages[:, :L].reshape(-1), returns[:, :L].reshape(-1)
-        batch = T * L
-        mb = batch // args.minibatches
-        for _ in range(args.epochs):
-            order = torch.randperm(batch, device=device)
-            for s in range(0, batch, mb):
-                idx = order[s:s + mb]
-                _, logp, entropy, value = agent.act(b_obs[idx], b_act[idx])
-                ratio = (logp - b_logp[idx]).exp()             # new probability / old
-                adv = (b_adv[idx] - b_adv[idx].mean()) / (b_adv[idx].std() + 1e-8)
-                # the clipped PPO objective: follow the advantage, but not too far
-                policy_loss = -torch.min(ratio * adv, ratio.clamp(1 - args.clip, 1 + args.clip) * adv).mean()
-                value_loss = 0.5 * (value - b_ret[idx]).pow(2).mean()
-                loss = policy_loss + 0.5 * value_loss - args.entropy * entropy.mean()
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
-                optimizer.step()
+        # hand the rollout to the learner (once it's done with the last one), and play
+        # the next one with the weights it has learned so far
+        if learning:
+            learning.join()
+        actor.load_state_dict(agent.state_dict())
+        if learn_stream:
+            learn_stream.wait_stream(torch.cuda.current_stream())    # the rollout is written
+        learning = threading.Thread(target=learn, args=(buf, next_value))
+        learning.start()
 
         # --- 4. report -------------------------------------------------------
         elapsed = time.time() - start
         writer.add_scalar("speed/decisions_per_second", decisions / elapsed, decisions)
-        writer.add_scalar("loss/policy", policy_loss.item(), decisions)
-        writer.add_scalar("loss/value", value_loss.item(), decisions)
-        writer.add_scalar("policy/entropy", entropy.mean().item(), decisions)
+        if stats:
+            writer.add_scalar("loss/policy", stats["policy"], decisions)
+            writer.add_scalar("loss/value", stats["value"], decisions)
+            writer.add_scalar("policy/entropy", stats["entropy"], decisions)
         writer.add_scalar("best/progress", best_progress, decisions)
         if best_time is not None:
             writer.add_scalar("best/time_s", best_time / 1000, decisions)
@@ -252,7 +301,7 @@ def main():
             writer.add_scalar("episode/return", np.mean(ended_returns), decisions)
             writer.add_scalar("episode/finish_rate", np.mean(ended_finished), decisions)
         if update % 10 == 0:
-            torch.save(agent.state_dict(), out / "agent.pt")
+            torch.save(actor.state_dict(), out / "agent.pt")
             mean_progress = np.mean(ended_progress) if ended_progress else 0
             print(f"update {update:5d}  {elapsed / 60:5.1f} min  {decisions / 1e6:7.1f}M decisions  "
                   f"episodes {episodes:8d}  progress mean {mean_progress:5.1%} best {best_progress:5.1%}"
@@ -261,6 +310,8 @@ def main():
                   + (f" (+{len(env.practice_restarts)} practice)" if env.practice_restarts else "")
                   + (f"  practice finishes {practice_finishes}" if practice_finishes else ""))
 
+    if learning:
+        learning.join()
     torch.save(agent.state_dict(), out / "agent.pt")
     writer.close()
     print(f"done: best progress {best_progress:.1%}"

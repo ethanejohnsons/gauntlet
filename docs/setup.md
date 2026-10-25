@@ -23,7 +23,8 @@ if they're there, and builds the copy, so the submodule stays clean. Output in
 ### The private engine patches
 
 Replaying runs in the real game (`gs_replay`, used by `tools/render_run.sh` and the video
-overlay) needs two small oDFe patches. They're kept in a separate **private** repository,
+overlay) needs a few small oDFe patches (the input replay, a video timing log, and the
+chase camera the videos are filmed from). They're kept in a separate **private** repository,
 because input replay is a tool-assisted playback tool and could be used to fake record demos.
 If you have access, clone it into place before building:
 
@@ -186,3 +187,16 @@ tools/render_run.sh build/runs/tatmt-s2_ai.run tatmt-s2_ai
 ```
 
 The result is `build/video/tatmt-s2_ai_overlay.mp4`.
+
+A best run from training (`best_time` or `best_progress`) works too: training saves
+what it needs to rebuild exactly what the network was thinking during it.
+
+```sh
+.venv/bin/python tools/think_from_run.py runs/tatmt-s2/<name>/best_time -o build/runs/tatmt-s2_best
+tools/render_run.sh build/runs/tatmt-s2_best.run tatmt-s2_best
+.venv/bin/python tools/overlay.py build/video/tatmt-s2_best.mp4 build/runs/tatmt-s2_best.think.npz \
+    build/runs/tatmt-s2_best.weights.pt --label "2 HOURS OF TRAINING"
+```
+
+Videos are filmed from a chase camera behind the player; `CAMERA=eyes tools/render_run.sh ...`
+films through its eyes instead.

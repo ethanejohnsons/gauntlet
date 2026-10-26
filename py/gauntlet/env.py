@@ -271,12 +271,7 @@ class VecEnv:
             restarts = self.practice_restarts if self.synthetic[i] else self.restarts
             kept = restarts.get(cell)
             if kept is None or self.frames[i] < kept.frames:
-                snapshot = C.create_string_buffer(len(self.snapshot))
-                self.lib.gs_env_save(self.envs[i], snapshot)
-                restarts[cell] = Restart(snapshot, int(self.leg[i]), int(self.frames[i]),
-                                              self.history[i, :self.frames[i]].copy(),
-                                              float(self.returns[i]), self._recent_in_order(i),
-                                              int(self.held[i]), *self._decisions_of(i))
+                restarts[cell] = self.moment(i)
 
     def _restart(self, indices):
         """Start new episodes: from the spawn, or (restart_fraction of them) from a
@@ -305,15 +300,7 @@ class VecEnv:
                 cell, practice = picks[i]
                 kept = (self.practice_restarts if practice else self.restarts)[cell]
                 self.synthetic[i] = practice
-                self.lib.gs_env_restore(self.envs[i], kept.snapshot)
-                self._set_leg(i, kept.leg)
-                self.frames[i] = kept.frames
-                self.history[i, :kept.frames] = kept.history
-                self.returns[i] = kept.returns
-                self.recent[i] = np.roll(kept.recent, self.tick)
-                self.held[i] = kept.held
-                self.decisions[i, :len(kept.decisions)] = kept.decisions
-                self.decision_versions[i, :len(kept.versions)] = kept.versions
+                self._resume(i, kept)
                 rockets = (cell % 8) // 2
                 if not practice and not self.scout[i] and rockets < kept.held and self.rng.random() < AMMO_RESTARTS:
                     self.lib.gs_env_set_ammo(self.envs[i], sim.WP_ROCKET_LAUNCHER, kept.held)
@@ -325,6 +312,38 @@ class VecEnv:
         self.from_spawn[indices] = ~restart
         self.closest[indices] = np.inf
         self.closer_frame[indices] = self.frames[indices]
+
+    def moment(self, i):
+        """Player i's env and episode so far, as a Restart to start other episodes from."""
+        snapshot = C.create_string_buffer(len(self.snapshot))
+        self.lib.gs_env_save(self.envs[i], snapshot)
+        return Restart(snapshot, int(self.leg[i]), int(self.frames[i]), self.history[i, :self.frames[i]].copy(),
+                       float(self.returns[i]), self._recent_in_order(i), int(self.held[i]), *self._decisions_of(i))
+
+    def _resume(self, i, kept):
+        """Put player i where a Restart was (the env and the episode so far)."""
+        self.lib.gs_env_restore(self.envs[i], kept.snapshot)
+        self._set_leg(i, kept.leg)
+        self.frames[i] = kept.frames
+        self.history[i, :kept.frames] = kept.history
+        self.returns[i] = kept.returns
+        self.recent[i] = np.roll(kept.recent, self.tick)
+        self.held[i] = kept.held
+        self.decisions[i, :len(kept.decisions)] = kept.decisions
+        self.decision_versions[i, :len(kept.versions)] = kept.versions
+
+    def start_all_from(self, kept):
+        """Start every player's episode from one Restart (instead of the spawn), for
+        searching or testing from a moment of a run. Returns the observations."""
+        for i in range(self.n):
+            self._resume(i, kept)
+            self.seen[i] = set()
+        self.from_spawn[:] = self.synthetic[:] = False
+        self.cell[:] = -1
+        self.closest[:] = np.inf
+        self.closer_frame[:] = self.frames
+        self._observe()
+        return self.obs.copy()
 
     def seed_restarts(self, runs):
         """Remember restart points along saved runs (whole runs from the spawn, like an

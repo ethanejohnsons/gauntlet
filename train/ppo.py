@@ -19,9 +19,11 @@ How it works, in short:
     .venv/bin/python train/ppo.py vanilla_01
     .venv/bin/tensorboard --logdir runs/      # then open http://localhost:6006
 
-Outputs go to runs/<map>/<name>/: TensorBoard logs, agent.pt (the network), and
-best_progress.run / best_time.run. Each best run also gets a .decisions.npz (what was
-chosen at every decision, and by which version of the network) and a .weights.pt
+Outputs go to runs/<map>/<name>/: TensorBoard logs, agent.pt (the network),
+best_progress.run / best_time.run, and best_own.run: the fastest finish the network
+played entirely itself (no stretch replayed from a seed run). Each best run also gets
+a .decisions.npz (what was chosen at every decision, and by which version of the
+network) and a .weights.pt
 (those versions), so tools/think_from_run.py can rebuild exactly what the network
 was thinking during it, for tools/overlay.py.
 """
@@ -224,7 +226,7 @@ def main():
             stats.update(policy=policy_loss.item(), value=value_loss.item(), entropy=entropy.mean().item())
 
     obs = torch.tensor(env.reset(), device=device)
-    best_progress, best_time = 0.0, None
+    best_progress, best_time, best_own = 0.0, None, None
     versions = {}               # network version (update number) -> its weights
     practice_finishes = 0       # finishes from ammo restarts (practice, not real runs)
     episodes, decisions, update = 0, 0, 0
@@ -270,6 +272,11 @@ def main():
                         best_time = int(info["timer_ms"][k])
                         save_run(out / "best_time", env.make_run(info["runs"][i]), info["decisions"][i], versions)
                         print(f"  new best time: {best_time / 1000:.3f} s (episode {episodes})")
+                    own = info["finished"][k] and (info["decisions"][i][1] >= 0).all()
+                    if own and (best_own is None or info["timer_ms"][k] < best_own):
+                        best_own = int(info["timer_ms"][k])
+                        save_run(out / "best_own", env.make_run(info["runs"][i]), info["decisions"][i], versions)
+                        print(f"  new best time of its own: {best_own / 1000:.3f} s (episode {episodes})")
                     if info["progress"][k] > best_progress + 0.01:
                         best_progress = float(info["progress"][k])
                         save_run(out / "best_progress", env.make_run(info["runs"][i]), info["decisions"][i], versions)

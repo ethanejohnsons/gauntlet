@@ -117,6 +117,12 @@ class Panel:
             y += step / 2
         self.rows_y = bottom + 16
         self.background = self._background()
+        # for stretches of a run whose network wasn't saved (see tools/think_from_run.py)
+        self.unknown = self.background.copy()
+        d = ImageDraw.Draw(self.unknown)
+        for k, line in enumerate(("replaying an earlier", "run's moves: its", "thinking wasn't saved")):
+            w = d.textlength(line, font=self.font)
+            d.text((self.x0 + (self.pw - w) / 2, self.y0 + 110 + 20 * k), line, font=self.font, fill=DIM)
 
     def _box(self, d, box):
         x0, y0, x1, y1 = box
@@ -264,10 +270,12 @@ def main():
         d_index = min(d_index, len(think["frame"]) - 1)
         # (an empty panel before the first decision, and where the network that made a
         # decision wasn't saved: see tools/think_from_run.py)
-        if d_index >= 0 and ("known" not in think or think["known"][d_index]):
-            img.alpha_composite(panel.draw(d_index))
-        else:
+        if d_index < 0:
             img.alpha_composite(panel.background)
+        elif "known" in think and not think["known"][d_index]:
+            img.alpha_composite(panel.unknown)
+        else:
+            img.alpha_composite(panel.draw(d_index))
         enc.stdin.write(img.convert("RGB").tobytes())
         k += 1
         written += 1
